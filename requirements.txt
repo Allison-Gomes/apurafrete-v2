@@ -1,0 +1,30 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ApuraFrete v2 — Dependências de Produção
+# Python 3.13.5
+# Atualizado: 23/06/2026
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+
+# Banco de dados
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg2-binary==2.9.10
+
+# Validação e serialização
+pydantic==2.10.3
+pydantic-settings==2.6.1
+email-validator==2.2.0
+
+# Autenticação e segurança
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.12
+
+# Planilhas
+openpyxl==3.1.5
+
+# Utilitários
+python-dotenv==1.0.1

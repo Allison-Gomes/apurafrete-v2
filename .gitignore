@@ -1,0 +1,32 @@
+# Ambiente
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Ambiente virtual
+.venv/
+venv/
+
+# Testes
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Markdown (ignora tudo, exceto docs essenciais)
+*.md
+!README.md
+
