@@ -14,9 +14,8 @@
              app/schemas/nota_fiscal.py
              app/services/calculo_frete_service.py (ResultadoFrete)
 📅 CRIADO   : 07/07/2026
-📅 ATUALIZADO: 11/07/2026 — + atualizar_resultado_frete (aceita
-              ResultadoFrete direto); frete_cte/frete_total opcionais
-              no atualizar_calculo; wrappers de módulo para service.
+📅 ATUALIZADO: 16/07/2026 — + buscar_por_embarque_e_id
+              (validação de pertencimento NF↔embarque).
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
@@ -95,6 +94,34 @@ class NotaFiscalRepository:
         return self.session.execute(stmt).scalar_one_or_none()
 
     # ─────────────────────────────────────────────
+    # 🔍 LEITURA: por embarque E id (pertencimento)
+    # ─────────────────────────────────────────────
+    def buscar_por_embarque_e_id(
+        self, embarque_id: UUID, nf_id: UUID
+    ) -> NotaFiscal | None:
+        '''
+        🎯 O QUE FAZ:
+            Busca uma NF ativa pelo id, validando que
+            ela pertence ao embarque informado. Usado
+            pelo endpoint individual de cálculo para
+            garantir que a NF é do embarque da URL.
+
+        📥 PARÂMETROS:
+            embarque_id (UUID): ID do embarque dono.
+            nf_id       (UUID): ID da nota fiscal.
+
+        📤 RETORNO:
+            NotaFiscal | None
+        '''
+        stmt = (
+            select(NotaFiscal)
+            .where(NotaFiscal.id == nf_id)
+            .where(NotaFiscal.embarque_id == embarque_id)
+            .where(NotaFiscal.ativo.is_(True))
+        )
+        return self.session.execute(stmt).scalar_one_or_none()
+
+    # ─────────────────────────────────────────────
     # 🔍 LEITURA: por embarque
     # ─────────────────────────────────────────────
     def listar_por_embarque(
@@ -158,9 +185,9 @@ class NotaFiscalRepository:
         self,
         nf: NotaFiscal,
         *,
-        frete_peso = None,
-        frete_cte = None,
-        frete_total = None,
+        frete_peso=None,
+        frete_cte=None,
+        frete_total=None,
         status: StatusCalculoNF,
         erro_calculo: str | None = None,
     ) -> NotaFiscal:
@@ -261,10 +288,26 @@ def buscar_por_embarque(db: Session, embarque_id: str) -> list[NotaFiscal]:
     return repo.listar_por_embarque(UUID(embarque_id))
 
 
+def buscar_por_embarque_e_id(
+    db: Session, embarque_id: str, nf_id: str
+) -> NotaFiscal | None:
+    '''
+    🎯 O QUE FAZ:
+        Wrapper de módulo que busca uma NF validando
+        pertencimento ao embarque. Usado pelo endpoint
+        individual de cálculo.
+
+    📤 RETORNO:
+        NotaFiscal | None
+    '''
+    repo = NotaFiscalRepository(db)
+    return repo.buscar_por_embarque_e_id(UUID(embarque_id), UUID(nf_id))
+
+
 def atualizar_resultado_frete(
     db: Session,
     nf: NotaFiscal,
-    resultado = None,
+    resultado=None,
     status: StatusCalculoNF | None = None,
     erro: str | None = None,
 ) -> NotaFiscal:

@@ -16,19 +16,19 @@
              Retorna o valor calculado + metadados
              para auditoria (tabela, faixas, pesos).
 
-             Camada de orquestração (calcular_frete_por_nf
-             e calcular_frete_em_lote): busca a NF,
-             navega até a transportadora, chama o engine,
-             trata erros e persiste o resultado.
+             Camada de orquestração:
+               calcular_frete_nf_no_embarque — individual com
+                 validação de pertencimento ao embarque.
+               calcular_frete_em_lote — lote inteiro do embarque.
 🔗 DEPENDE  : app.models.tabela_frete
              app.models.transportadora
              app.models.nota_fiscal
              app.repositories.nota_fiscal_repository
              app.core.exceptions
 📅 CRIADO   : 11/07/2026
-📅 ATUALIZADO: 11/07/2026 — criação inicial (MVP)
-              11/07/2026 — + calcular_frete_por_nf,
-              calcular_frete_em_lote (orquestração).
+📅 ATUALIZADO: 16/07/2026 — +NFPertenceEmbarqueError;
+              calcular_frete_nf_no_embarque agora lança
+              exceção; router só trata HTTP.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
@@ -49,6 +49,7 @@ from app.repositories.nota_fiscal_repository import (
     NotaFiscalRepository,
     atualizar_resultado_frete,
     buscar_por_embarque,
+    buscar_por_embarque_e_id,
 )
 
 
@@ -58,76 +59,45 @@ from app.repositories.nota_fiscal_repository import (
 # ═════════════════════════════════════════════════
 
 class CalculoFreteError(Exception):
-    '''
-    🎯 O QUE FAZ:
-        Exceção base para erros do engine de cálculo
-        de frete. Herde dela para erros específicos.
-    '''
+    '''Exceção base para erros do engine de cálculo de frete.'''
     pass
 
 
 class TransportadoraSemTabelaError(CalculoFreteError):
-    '''
-    🎯 O QUE FAZ:
-        Lançada quando a transportadora da NF não
-        possui nenhuma tabela com tabela_ativa=True.
-    '''
+    '''Transportadora da NF não possui tabela com tabela_ativa=True.'''
     pass
 
 
 class TabelaSemFaixasError(CalculoFreteError):
-    '''
-    🎯 O QUE FAZ:
-        Lançada quando a tabela ativa não possui
-        faixas de peso configuradas.
-    '''
+    '''Tabela ativa não possui faixas de peso configuradas.'''
     pass
 
 
 class PesoInvalidoError(CalculoFreteError):
-    '''
-    🎯 O QUE FAZ:
-        Lançada quando o peso informado na NF é
-        inválido (None, zero ou negativo).
-    '''
+    '''Peso informado na NF é inválido (None, zero ou negativo).'''
     pass
 
 
 class FaixaIncompletaError(CalculoFreteError):
+    '''Tabela não possui as duas faixas obrigatórias do MVP (0→30 e 30→∞).'''
+    pass
+
+
+class NFPertenceEmbarqueError(Exception):
     '''
-    🎯 O QUE FAZ:
-        Lançada quando a tabela não possui as duas
-        faixas obrigatórias do MVP (0→30 e 30→∞).
+    🆕 16/07/2026
+    NF não pertence ao embarque informado.
+    Lançada por calcular_frete_nf_no_embarque e
+    capturada pelo router para retornar HTTP 404.
     '''
     pass
 
 
 # ═════════════════════════════════════════════════
 # 📦 TIPOS DE RETORNO
-# Estruturas devolvidas pelo engine e pela camada
-# de orquestração.
 # ═════════════════════════════════════════════════
 
 class ResultadoFrete(TypedDict):
-    '''
-    🎯 O QUE FAZ:
-        Tipagem do dicionário retornado por
-        calcular_frete_nf. Contém o valor final
-        e todos os metadados necessários para
-        auditoria e rastreabilidade.
-
-    📐 CAMPOS:
-        - valor_frete        : Decimal — valor final do frete
-        - peso_utilizado_kg  : Decimal — peso efetivamente usado
-        - tabela_id          : str    — UUID da tabela aplicada
-        - tabela_nome        : str    — nome da tabela
-        - modalidade         : str    — progressivo | por_faixa
-        - faixa_fixa_id      : str    — UUID da faixa 0→30 usada
-        - valor_fixo         : Decimal — valor_minimo_faixa da faixa 1
-        - faixa_adicional_id : str|None — UUID da faixa 30→∞
-        - valor_adicional    : Decimal — valor do adicional (se houver)
-        - peso_excedente_kg  : Decimal — kg acima de 30 (se houver)
-    '''
     valor_frete: Decimal
     peso_utilizado_kg: Decimal
     tabela_id: str
@@ -141,22 +111,6 @@ class ResultadoFrete(TypedDict):
 
 
 class ResultadoCalculoNF(TypedDict):
-    '''
-    🎯 O QUE FAZ:
-        Resultado da orquestração para UMA NF:
-        contém o status final e, se calculado,
-        os valores de frete e metadados.
-
-    📐 CAMPOS:
-        - nf_id              : str  — UUID da NF
-        - numero_nf          : str  — número fiscal
-        - status             : str  — calculado | sem_tabela
-                                      | sem_transportadora | erro
-        - valor_frete        : Decimal|None
-        - peso_utilizado_kg  : Decimal|None
-        - tabela_nome        : str|None
-        - erro               : str|None
-    '''
     nf_id: str
     numero_nf: str
     status: str
@@ -167,21 +121,6 @@ class ResultadoCalculoNF(TypedDict):
 
 
 class ResultadoCalculoLote(TypedDict):
-    '''
-    🎯 O QUE FAZ:
-        Resultado da orquestração para um EMBARQUE
-        inteiro (lote). Agrega os contadores e a
-        lista de ResultadoCalculoNF.
-
-    📐 CAMPOS:
-        - embarque_id        : str  — UUID do embarque
-        - total_nfs          : int
-        - calculadas         : int
-        - sem_tabela         : int
-        - sem_transportadora : int
-        - erro               : int
-        - resultados         : list[ResultadoCalculoNF]
-    '''
     embarque_id: str
     total_nfs: int
     calculadas: int
@@ -193,8 +132,6 @@ class ResultadoCalculoLote(TypedDict):
 
 # ═════════════════════════════════════════════════
 # 🧮 ENGINE DE CÁLCULO (NÍVEL BAIXO)
-# Funções puras: recebem parâmetros, devolvem
-# ResultadoFrete ou lançam exceção.
 # ═════════════════════════════════════════════════
 
 def calcular_frete_nf(
@@ -204,52 +141,17 @@ def calcular_frete_nf(
     nf_id: str | None = None,
 ) -> ResultadoFrete:
     '''
-    🎯 O QUE FAZ:
-        Calcula o valor do frete de uma NF aplicando
-        a tabela ativa da transportadora.
-
-    📥 PARÂMETROS:
-        db                : Session SQLAlchemy ativa.
-        transportadora_id : UUID da transportadora da NF.
-        peso_total_kg     : Peso total da NF em kg.
-        nf_id             : (opcional) ID da NF, apenas
-                            para mensagens de erro mais
-                            claras.
-
-    📤 RETORNO:
-        ResultadoFrete — dicionário com o valor calculado
-        e todos os metadados de rastreabilidade.
+    🎯 Calcula o valor do frete de uma NF aplicando
+    a tabela ativa da transportadora.
 
     ❌ EXCEÇÕES:
-        PesoInvalidoError              — peso ≤ 0 ou None.
-        TransportadoraSemTabelaError   — sem tabela ativa.
-        TabelaSemFaixasError           — tabela sem faixas.
-        FaixaIncompletaError           — faltam faixas do MVP.
-
-    📐 FLUXO:
-        1. Valida peso_total_kg.
-        2. Busca tabela ativa da transportadora.
-        3. Busca faixas ordenadas por peso_ate_kg.
-        4. Identifica faixa fixa (0→30) e faixa adicional (30→∞).
-        5. Aplica fórmula progressiva.
-        6. Retorna ResultadoFrete.
-
-    ⚠️  ATENÇÃO:
-        Não modificar sem autorização de Allison.
+        PesoInvalidoError, TransportadoraSemTabelaError,
+        TabelaSemFaixasError, FaixaIncompletaError.
     '''
-    # ── 1. Validação do peso ─────────────────────
     _validar_peso(peso_total_kg, nf_id)
-
-    # ── 2. Busca da tabela ativa ─────────────────
     tabela = _obter_tabela_ativa(db, transportadora_id)
-
-    # ── 3. Busca das faixas ──────────────────────
     faixas = _obter_faixas(tabela)
-
-    # ── 4. Identificação das faixas do MVP ───────
     faixa_fixa, faixa_adicional = _identificar_faixas_mvp(faixas, tabela)
-
-    # ── 5. Cálculo do frete ──────────────────────
     return _aplicar_formula_progressiva(
         peso_total_kg=peso_total_kg,
         faixa_fixa=faixa_fixa,
@@ -286,8 +188,7 @@ def _obter_tabela_ativa(db: Session, transportadora_id: str) -> TabelaFrete:
     if tabela is None:
         raise TransportadoraSemTabelaError(
             f"Transportadora {transportadora_id} não possui "
-            f"tabela de frete ativa. Cadastre uma tabela e "
-            f"marque-a como ativa antes de calcular o frete."
+            f"tabela de frete ativa."
         )
     return tabela
 
@@ -321,14 +222,12 @@ def _identificar_faixas_mvp(
     if faixa_fixa is None:
         raise FaixaIncompletaError(
             f"Tabela '{tabela.nome}' (id={tabela.id}) não possui "
-            f"faixa fixa (0 → 30 kg). Cadastre a faixa com "
-            f"peso_de_kg=0 e peso_ate_kg=30."
+            f"faixa fixa (0 → 30 kg)."
         )
     if faixa_adicional is None:
         raise FaixaIncompletaError(
             f"Tabela '{tabela.nome}' (id={tabela.id}) não possui "
-            f"faixa adicional (30 kg → ∞). Cadastre a faixa com "
-            f"peso_de_kg=30 e peso_ate_kg=NULL."
+            f"faixa adicional (30 kg → ∞)."
         )
 
     return faixa_fixa, faixa_adicional
@@ -343,7 +242,6 @@ def _aplicar_formula_progressiva(
     valor_fixo = faixa_fixa.valor_minimo_faixa or Decimal("0")
     peso_limite = Decimal("30")
 
-    # ── Caso 1: peso dentro da faixa fixa ────────
     if peso_total_kg <= peso_limite:
         return ResultadoFrete(
             valor_frete=valor_fixo,
@@ -358,7 +256,6 @@ def _aplicar_formula_progressiva(
             peso_excedente_kg=Decimal("0"),
         )
 
-    # ── Caso 2: peso excede a faixa fixa ─────────
     peso_excedente = peso_total_kg - peso_limite
     valor_adicional = peso_excedente * faixa_adicional.valor_kg
     valor_frete = valor_fixo + valor_adicional
@@ -379,40 +276,42 @@ def _aplicar_formula_progressiva(
 
 # ═════════════════════════════════════════════════
 # 🎯 ORQUESTRAÇÃO (NÍVEL ALTO)
-# Funções que o router chama. Cuidam de:
-#   - buscar NF e navegar até transportadora
-#   - tratar exceções do engine → status
-#   - persistir resultado via repository
 # ═════════════════════════════════════════════════
+
+def calcular_frete_nf_no_embarque(
+    db: Session,
+    embarque_id: str,
+    nf_id: str,
+) -> ResultadoCalculoNF:
+    '''
+    🎯 Ponto de entrada do endpoint individual.
+    Valida pertencimento NF↔embarque.
+
+    ❌ EXCEÇÕES:
+        NFPertenceEmbarqueError — NF não pertence ao embarque
+        (capturada pelo router → HTTP 404).
+
+    📐 Demais erros viram status no ResultadoCalculoNF
+    (sem_transportadora, sem_tabela, erro).
+    '''
+    nf = buscar_por_embarque_e_id(db, embarque_id, nf_id)
+    if nf is None:
+        raise NFPertenceEmbarqueError(
+            f"NF {nf_id} não encontrada no embarque {embarque_id}."
+        )
+
+    return _calcular_e_persistir(db, nf)
+
 
 def calcular_frete_por_nf(
     db: Session,
     nf_id: str,
 ) -> ResultadoCalculoNF:
     '''
-    🎯 O QUE FAZ:
-        Orquestra o cálculo de frete para UMA NF:
-        busca a NF, obtém a transportadora do embarque,
-        chama o engine e persiste o resultado.
-
-    📥 PARÂMETROS:
-        db    : Session SQLAlchemy ativa.
-        nf_id : UUID da NotaFiscal.
-
-    📤 RETORNO:
-        ResultadoCalculoNF com status e, se sucesso,
-        valor_frete + metadados. NUNCA lança exceção
-        — erros viram status + campo erro preenchido.
-
-    📐 STATUS POSSÍVEIS:
-        - "calculado"          : frete calculado com sucesso.
-        - "sem_transportadora" : embarque não tem transportadora.
-        - "sem_tabela"         : transportadora sem tabela ativa.
-        - "erro"               : peso inválido, faixas incompletas, etc.
+    🎯 Orquestra cálculo para UMA NF (sem validação de embarque).
+    ⚠️ USO INTERNO.
     '''
     repo = NotaFiscalRepository(db)
-
-    # ── 1. Busca a NF ────────────────────────────
     nf = repo.buscar_por_id(nf_id)
     if nf is None:
         return _erro_individual(
@@ -421,62 +320,7 @@ def calcular_frete_por_nf(
             status="erro",
             erro="NF não encontrada ou inativa.",
         )
-
-    # ── 2. Navega até a transportadora ───────────
-    if nf.embarque is None or nf.embarque.transportadora_id is None:
-        _persistir_erro(db, nf, StatusCalculoNF.SEM_TRANSPORTADORA,
-                        "Embarque sem transportadora definida.")
-        return _erro_individual(
-            nf_id=str(nf.id),
-            numero_nf=nf.numero_nf,
-            status="sem_transportadora",
-            erro="Embarque sem transportadora definida.",
-        )
-
-    transportadora_id = str(nf.embarque.transportadora_id)
-
-    # ── 3. Chama o engine ────────────────────────
-    try:
-        resultado = calcular_frete_nf(
-            db=db,
-            transportadora_id=transportadora_id,
-            peso_total_kg=nf.peso_real_kg,
-            nf_id=str(nf.id),
-        )
-    except TransportadoraSemTabelaError as exc:
-        _persistir_erro(db, nf, StatusCalculoNF.SEM_TABELA, str(exc))
-        return _erro_individual(
-            nf_id=str(nf.id),
-            numero_nf=nf.numero_nf,
-            status="sem_tabela",
-            erro=str(exc),
-        )
-    except (PesoInvalidoError, TabelaSemFaixasError, FaixaIncompletaError) as exc:
-        _persistir_erro(db, nf, StatusCalculoNF.ERRO, str(exc))
-        return _erro_individual(
-            nf_id=str(nf.id),
-            numero_nf=nf.numero_nf,
-            status="erro",
-            erro=str(exc),
-        )
-
-    # ── 4. Persiste o sucesso ────────────────────
-    atualizar_resultado_frete(
-        db=db,
-        nf=nf,
-        resultado=resultado,
-        status=StatusCalculoNF.CALCULADO,
-    )
-
-    return ResultadoCalculoNF(
-        nf_id=str(nf.id),
-        numero_nf=nf.numero_nf,
-        status="calculado",
-        valor_frete=resultado["valor_frete"],
-        peso_utilizado_kg=resultado["peso_utilizado_kg"],
-        tabela_nome=resultado["tabela_nome"],
-        erro=None,
-    )
+    return _calcular_e_persistir(db, nf)
 
 
 def calcular_frete_em_lote(
@@ -484,27 +328,9 @@ def calcular_frete_em_lote(
     embarque_id: str,
 ) -> ResultadoCalculoLote:
     '''
-    🎯 O QUE FAZ:
-        Orquestra o cálculo de frete para TODAS as
-        NFs de um embarque. Itera sobre cada NF,
-        chama o engine, trata erros individualmente
-        e persiste cada resultado.
-
-    📥 PARÂMETROS:
-        db          : Session SQLAlchemy ativa.
-        embarque_id : UUID do embarque.
-
-    📤 RETORNO:
-        ResultadoCalculoLote com contadores agregados
-        e lista detalhada de ResultadoCalculoNF.
-
-    📐 REGRA DE NEGÓCIO:
-        - O erro em uma NF NÃO interrompe o lote.
-        - Cada NF tem seu resultado individual.
-        - O commit é feito pelo chamador (router),
-          normalmente ao final do lote inteiro.
+    🎯 Orquestra cálculo para TODAS as NFs de um embarque.
+    Erro em uma NF NÃO interrompe o lote.
     '''
-    # ── 1. Busca todas as NFs do embarque ────────
     nfs = buscar_por_embarque(db, embarque_id)
 
     if not nfs:
@@ -518,7 +344,6 @@ def calcular_frete_em_lote(
             resultados=[],
         )
 
-    # ── 2. Itera sobre cada NF ───────────────────
     resultados: list[ResultadoCalculoNF] = []
     contadores = {
         "calculadas": 0,
@@ -528,7 +353,7 @@ def calcular_frete_em_lote(
     }
 
     for nf in nfs:
-        item = _calcular_uma_nf_no_lote(db, nf)
+        item = _calcular_e_persistir(db, nf)
         contadores[item["status"]] += 1
         resultados.append(item)
 
@@ -547,20 +372,15 @@ def calcular_frete_em_lote(
 # 🔒 HELPERS DA ORQUESTRAÇÃO
 # ─────────────────────────────────────────────────
 
-def _calcular_uma_nf_no_lote(
+def _calcular_e_persistir(
     db: Session,
     nf: NotaFiscal,
 ) -> ResultadoCalculoNF:
     '''
-    🎯 O QUE FAZ:
-        Orquestra o cálculo de UMA NF dentro do lote.
-        Similar a calcular_frete_por_nf, mas recebe
-        o model já carregado (evita query extra).
-
-    📐 REGRA:
-        NUNCA lança exceção — todo erro vira status.
+    🎯 Núcleo compartilhado: recebe model NotaFiscal,
+    navega até transportadora, chama engine e persiste.
+    NUNCA lança exceção — todo erro vira status.
     '''
-    # ── Verifica transportadora ──────────────────
     if nf.embarque is None or nf.embarque.transportadora_id is None:
         _persistir_erro(db, nf, StatusCalculoNF.SEM_TRANSPORTADORA,
                         "Embarque sem transportadora definida.")
@@ -573,7 +393,6 @@ def _calcular_uma_nf_no_lote(
 
     transportadora_id = str(nf.embarque.transportadora_id)
 
-    # ── Chama o engine ───────────────────────────
     try:
         resultado = calcular_frete_nf(
             db=db,
@@ -598,7 +417,6 @@ def _calcular_uma_nf_no_lote(
             erro=str(exc),
         )
 
-    # ── Persiste o sucesso ───────────────────────
     atualizar_resultado_frete(
         db=db,
         nf=nf,
@@ -623,11 +441,6 @@ def _persistir_erro(
     status: StatusCalculoNF,
     mensagem: str,
 ) -> None:
-    '''
-    🎯 O QUE FAZ:
-        Atualiza a NF com status de erro e mensagem,
-        usando o wrapper do repository.
-    '''
     atualizar_resultado_frete(
         db=db,
         nf=nf,
@@ -644,14 +457,6 @@ def _erro_individual(
     status: str,
     erro: str,
 ) -> ResultadoCalculoNF:
-    '''
-    🎯 O QUE FAZ:
-        Fabrica um ResultadoCalculoNF de falha,
-        com todos os campos de sucesso zerados.
-
-    📐 REGRA:
-        Evita repetição de código nos handlers de erro.
-    '''
     return ResultadoCalculoNF(
         nf_id=nf_id,
         numero_nf=numero_nf,
