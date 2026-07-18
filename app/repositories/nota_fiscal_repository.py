@@ -12,15 +12,19 @@
              numero_nf, serie_nf).
 🔗 DEPENDE  : app/models/nota_fiscal.py
              app/schemas/nota_fiscal.py
-             app/services/calculo_frete_service.py (ResultadoFrete)
 📅 CRIADO   : 07/07/2026
-📅 ATUALIZADO: 16/07/2026 — + buscar_por_embarque_e_id
-              (validação de pertencimento NF↔embarque).
+📅 ATUALIZADO: 18/07/2026 — substituídos campos frete_peso,
+              frete_cte, frete_total por valor_calculado,
+              preco_ate_30kg_usado, valor_kg_adicional_usado,
+              peso_kg_usado. atualizar_resultado_frete agora
+              recebe os snapshots de auditoria diretamente
+              (sem TypedDict intermediário).
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
 from __future__ import annotations
 
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -185,73 +189,87 @@ class NotaFiscalRepository:
         self,
         nf: NotaFiscal,
         *,
-        frete_peso=None,
-        frete_cte=None,
-        frete_total=None,
+        valor_calculado: Decimal | None = None,
+        preco_ate_30kg_usado: Decimal | None = None,
+        valor_kg_adicional_usado: Decimal | None = None,
+        peso_kg_usado: Decimal | None = None,
         status: StatusCalculoNF,
         erro_calculo: str | None = None,
     ) -> NotaFiscal:
         '''
         🎯 O QUE FAZ:
-            Grava o resultado do engine de cálculo na NF.
+            Grava o resultado do engine de cálculo na NF,
+            incluindo snapshots de auditoria.
 
         📐 REGRA DE NEGÓCIO:
-            - Em caso de ERRO, frete_* pode vir None e
-              erro_calculo deve descrever o problema.
-            - frete_cte e frete_total são opcionais: no MVP
-              só o frete_peso (frete calculado) é preenchido;
-              os demais vêm na etapa de auditoria do CT-e.
+            - Em caso de ERRO, os valores calculados podem
+              vir None e erro_calculo deve descrever o problema.
+            - Os snapshots (preco_ate_30kg_usado,
+              valor_kg_adicional_usado, peso_kg_usado) permitem
+              auditoria futura contra o CT-e.
             - Não faz commit (só flush).
 
         📤 RETORNO:
             NotaFiscal atualizada.
         '''
-        nf.frete_peso = frete_peso
-        nf.frete_cte = frete_cte
-        nf.frete_total = frete_total
+        nf.valor_calculado = valor_calculado
+        nf.preco_ate_30kg_usado = preco_ate_30kg_usado
+        nf.valor_kg_adicional_usado = valor_kg_adicional_usado
+        nf.peso_kg_usado = peso_kg_usado
         nf.status_calculo = status
         nf.erro_calculo = erro_calculo
         self.session.flush()
         return nf
 
     # ─────────────────────────────────────────────
-    # ✏️ ATUALIZAÇÃO: a partir de ResultadoFrete
+    # ✏️ ATUALIZAÇÃO: atalho para o engine de cálculo
     # ─────────────────────────────────────────────
     def atualizar_resultado_frete(
         self,
         nf: NotaFiscal,
-        resultado,           # ResultadoFrete (TypedDict)
+        *,
+        valor_calculado: Decimal | None = None,
+        preco_ate_30kg_usado: Decimal | None = None,
+        valor_kg_adicional_usado: Decimal | None = None,
+        peso_kg_usado: Decimal | None = None,
         status: StatusCalculoNF | None = None,
         erro: str | None = None,
     ) -> NotaFiscal:
         '''
         🎯 O QUE FAZ:
-            Atalho para atualizar_calculo que recebe um
-            ResultadoFrete direto do engine de cálculo e
-            faz o mapeamento automaticamente.
+            Atalho que recebe os snapshots de auditoria
+            diretamente do engine de cálculo e repassa
+            para atualizar_calculo.
 
         📥 PARÂMETROS:
-            nf        : instância NotaFiscal a atualizar.
-            resultado : ResultadoFrete (TypedDict do engine).
-                        Se None, grava status de erro.
-            status    : StatusCalculoNF (default: CALCULADO se
-                        resultado, ERRO se erro).
-            erro      : mensagem de erro (None se sucesso).
+            nf                      : instância NotaFiscal.
+            valor_calculado         : frete calculado pelo engine.
+            preco_ate_30kg_usado    : valor fixo da faixa 0→30.
+            valor_kg_adicional_usado: valor do kg excedente usado.
+            peso_kg_usado           : peso total utilizado no cálculo.
+            status                  : StatusCalculoNF.
+            erro                    : mensagem de erro (None se sucesso).
 
         📤 RETORNO:
             NotaFiscal atualizada.
         '''
-        if resultado is not None:
+        if valor_calculado is not None:
             return self.atualizar_calculo(
                 nf,
-                frete_peso=resultado["valor_frete"],
+                valor_calculado=valor_calculado,
+                preco_ate_30kg_usado=preco_ate_30kg_usado,
+                valor_kg_adicional_usado=valor_kg_adicional_usado,
+                peso_kg_usado=peso_kg_usado,
                 status=status or StatusCalculoNF.CALCULADO,
                 erro_calculo=None,
             )
 
         return self.atualizar_calculo(
             nf,
-            frete_peso=None,
+            valor_calculado=None,
+            preco_ate_30kg_usado=None,
+            valor_kg_adicional_usado=None,
+            peso_kg_usado=None,
             status=status or StatusCalculoNF.ERRO,
             erro_calculo=erro,
         )
@@ -307,22 +325,29 @@ def buscar_por_embarque_e_id(
 def atualizar_resultado_frete(
     db: Session,
     nf: NotaFiscal,
-    resultado=None,
+    *,
+    valor_calculado: Decimal | None = None,
+    preco_ate_30kg_usado: Decimal | None = None,
+    valor_kg_adicional_usado: Decimal | None = None,
+    peso_kg_usado: Decimal | None = None,
     status: StatusCalculoNF | None = None,
     erro: str | None = None,
 ) -> NotaFiscal:
     '''
     🎯 O QUE FAZ:
-        Wrapper de módulo que atualiza os campos de frete
-        e status de uma NF após o cálculo. Só dá flush —
-        o commit é feito pelo orquestrador.
+        Wrapper de módulo que atualiza os campos de frete,
+        snapshots de auditoria e status de uma NF após o
+        cálculo. Só dá flush — o commit é feito pelo orquestrador.
 
     📥 PARÂMETROS:
-        db        : Session ativa.
-        nf        : Instância da NF a atualizar.
-        resultado : ResultadoFrete do cálculo (se sucesso).
-        status    : Novo StatusCalculoNF.
-        erro      : Mensagem de erro (se falha).
+        db                      : Session ativa.
+        nf                      : Instância da NF a atualizar.
+        valor_calculado         : frete calculado (None se erro).
+        preco_ate_30kg_usado    : snapshot do valor fixo da faixa.
+        valor_kg_adicional_usado: snapshot do valor do kg excedente.
+        peso_kg_usado           : snapshot do peso usado no cálculo.
+        status                  : StatusCalculoNF.
+        erro                    : Mensagem de erro (None se sucesso).
 
     📤 RETORNO:
         A própria instância NotaFiscal atualizada.
@@ -330,7 +355,10 @@ def atualizar_resultado_frete(
     repo = NotaFiscalRepository(db)
     return repo.atualizar_resultado_frete(
         nf=nf,
-        resultado=resultado,
+        valor_calculado=valor_calculado,
+        preco_ate_30kg_usado=preco_ate_30kg_usado,
+        valor_kg_adicional_usado=valor_kg_adicional_usado,
+        peso_kg_usado=peso_kg_usado,
         status=status,
         erro=erro,
     )

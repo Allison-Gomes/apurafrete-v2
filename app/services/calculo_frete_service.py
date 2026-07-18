@@ -13,8 +13,8 @@
                  frete = valor_minimo_faixa +
                          (peso_total_kg − 30) × valor_kg (faixa 30→∞)
 
-             Retorna o valor calculado + metadados
-             para auditoria (tabela, faixas, pesos).
+             Retorna o valor calculado + snapshots para
+             auditoria (tabela, faixas, pesos).
 
              Camada de orquestração:
                calcular_frete_nf_no_embarque — individual com
@@ -26,9 +26,12 @@
              app.repositories.nota_fiscal_repository
              app.core.exceptions
 📅 CRIADO   : 11/07/2026
-📅 ATUALIZADO: 16/07/2026 — +NFPertenceEmbarqueError;
-              calcular_frete_nf_no_embarque agora lança
-              exceção; router só trata HTTP.
+📅 ATUALIZADO: 18/07/2026 — Refatoração: _calcular_e_persistir
+              agora usa nf.transportadora_id (campo direto) em vez
+              de navegar via nf.embarque.transportadora_id.
+              atualizar_resultado_frete passa snapshots de auditoria:
+              preco_ate_30kg_usado, valor_kg_adicional_usado,
+              peso_kg_usado.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
@@ -378,20 +381,23 @@ def _calcular_e_persistir(
 ) -> ResultadoCalculoNF:
     '''
     🎯 Núcleo compartilhado: recebe model NotaFiscal,
-    navega até transportadora, chama engine e persiste.
+    verifica transportadora_id (campo direto), chama
+    engine e persiste com snapshots de auditoria.
     NUNCA lança exceção — todo erro vira status.
     '''
-    if nf.embarque is None or nf.embarque.transportadora_id is None:
+    # transportadora_id agora é campo direto da NF
+    # (populado na importação ou herdado do embarque)
+    if nf.transportadora_id is None:
         _persistir_erro(db, nf, StatusCalculoNF.SEM_TRANSPORTADORA,
-                        "Embarque sem transportadora definida.")
+                        "NF sem transportadora definida.")
         return _erro_individual(
             nf_id=str(nf.id),
             numero_nf=nf.numero_nf,
             status="sem_transportadora",
-            erro="Embarque sem transportadora definida.",
+            erro="NF sem transportadora definida.",
         )
 
-    transportadora_id = str(nf.embarque.transportadora_id)
+    transportadora_id = str(nf.transportadora_id)
 
     try:
         resultado = calcular_frete_nf(
@@ -417,10 +423,14 @@ def _calcular_e_persistir(
             erro=str(exc),
         )
 
+    # ── Sucesso: persistir valor + snapshots de auditoria ──
     atualizar_resultado_frete(
         db=db,
         nf=nf,
-        resultado=resultado,
+        valor_calculado=resultado["valor_frete"],
+        preco_ate_30kg_usado=resultado["valor_fixo"],
+        valor_kg_adicional_usado=resultado["valor_adicional"],
+        peso_kg_usado=resultado["peso_utilizado_kg"],
         status=StatusCalculoNF.CALCULADO,
     )
 
@@ -444,7 +454,10 @@ def _persistir_erro(
     atualizar_resultado_frete(
         db=db,
         nf=nf,
-        resultado=None,
+        valor_calculado=None,
+        preco_ate_30kg_usado=None,
+        valor_kg_adicional_usado=None,
+        peso_kg_usado=None,
         status=status,
         erro=mensagem,
     )

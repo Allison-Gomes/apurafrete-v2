@@ -7,17 +7,21 @@
                - Cálculo de frete (individual e lote)
                - Exportação de embarque
 🔗 DEPENDE  : app.services.calculo_frete_service
+             app.services.exportacao_service
              app.schemas.nf_schema
              app.core.deps
 📅 CRIADO   : 07/07/2026
-📅 ATUALIZADO: 16/07/2026 — lógica movida p/ service;
-              router agora só faz HTTP in/out.
+📅 ATUALIZADO: 18/07/2026 — adicionado endpoint de
+              exportação (Etapa 4); router só faz
+              HTTP in/out.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
+from io import BytesIO
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.deps import get_db
@@ -30,6 +34,7 @@ from app.services.calculo_frete_service import (
     calcular_frete_nf_no_embarque,
     NFPertenceEmbarqueError,
 )
+from app.services.exportacao_service import exportar_embarque
 
 router = APIRouter(prefix='/embarques', tags=['Embarque'])
 
@@ -91,3 +96,34 @@ def calcular_frete_nf_individual(
             status_code=404,
             detail=f"NF {nf_id} não encontrada no embarque {embarque_id}.",
         )
+
+
+# ─────────────────────────────────────────────────
+# 📤 GET /embarques/{embarque_id}/exportar
+# ─────────────────────────────────────────────────
+@router.get(
+    '/{embarque_id}/exportar',
+    summary="Exportar embarque para Excel",
+)
+def exportar(
+    embarque_id: UUID,
+    db: Session = Depends(get_db),
+):
+    '''
+    Gera planilha Excel (.xlsx) com as NFs do embarque.
+
+    📎 Retorna arquivo para download com nome:
+        embarque_{id}_{data}.xlsx
+
+    📤 Retorna 404 se o embarque não for encontrado.
+    '''
+    bytes_xlsx, filename = exportar_embarque(db, embarque_id)
+
+    return StreamingResponse(
+        BytesIO(bytes_xlsx),
+        media_type=(
+            'application/vnd.openxmlformats-officedocument'
+            '.spreadsheetml.sheet'
+        ),
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )

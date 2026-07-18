@@ -11,9 +11,12 @@
               app/models/embarque.py
               app/models/transportadora.py
 📅 CRIADO   : 24/06/2026
-📅 ATUALIZADO: 11/07/2026 — padronização de docstrings
-               (aspas triplas simples) e comentários de
-               seção alinhados ao restante dos models.
+📅 ATUALIZADO: 18/07/2026 — Simplificação para alinhar
+               com nf_schema.py (Opção B). Removidos
+               campos de remetente, cod_cliente, cidade_*_raw.
+               Renomeados: qtd_cx → quantidade_volumes,
+               peso_total_kg → peso_real_kg,
+               cliente_destino → destinatario_nome, etc.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
@@ -70,12 +73,12 @@ class NotaFiscal(Base, AuditMixin):
         - Chave de deduplicação: (numero_nf, serie_nf) dentro do
           embarque (Seção 4.7).
         - Peso total derivado do catálogo:
-          peso_total_kg = QTD_CX × produto.peso_real_kg (Seção 3.1).
+          peso_real_kg = QTD_CX × produto.peso_real_kg (Seção 3.1).
           Não há cubagem — apenas peso real.
         - Fórmula de frete (Seção 6.4):
           Se ≤ 30kg → frete = preco_ate_30kg
           Se > 30kg → frete = preco_ate_30kg +
-                             (peso_total_kg − 30) × valor_kg_adicional
+                             (peso_real_kg − 30) × valor_kg_adicional
         - Snapshot para auditoria (Seção 6.6):
           preco_ate_30kg_usado, valor_kg_adicional_usado, peso_kg_usado.
 
@@ -125,102 +128,45 @@ class NotaFiscal(Base, AuditMixin):
         comment="Data de emissão da nota fiscal",
     )
 
-    # ── Destinatário (CLIENTE DESTINO) ───────────
-    cod_cliente = Column(
-        String(50),
-        nullable=False,
-        comment="Código do cliente destino. "
-                "Origem: coluna COD CLIENTE.",
-    )
-
-    cliente_destino = Column(
+    # ── Destinatário ─────────────────────────────
+    destinatario_nome = Column(
         String(200),
-        nullable=False,
-        comment="Nome do cliente destino. "
-                "Origem: coluna CLIENTE DESTINO.",
+        nullable=True,
+        comment="Nome do destinatário. "
+                "Origem: coluna DESTINATÁRIO da planilha.",
     )
 
-    cnpj_destino = Column(
+    destinatario_cnpj_cpf = Column(
         String(14),
-        nullable=False,
-        comment="CNPJ do destinatário (14 dígitos, sem máscara). "
-                "Origem: coluna CNPJ DESTINO.",
+        nullable=True,
+        comment="CNPJ/CPF do destinatário (sem máscara). "
+                "Origem: coluna CNPJ/CPF DESTINATÁRIO.",
     )
 
-    cidade_destino = Column(
+    destinatario_cidade = Column(
         String(100),
-        nullable=False,
+        nullable=True,
         comment="Cidade de destino. "
-                "Derivado de CIDADE - UF DESTINO (Seção 4.2).",
+                "Origem: coluna CIDADE DESTINO.",
     )
 
-    uf_destino = Column(
+    destinatario_uf = Column(
         String(2),
-        nullable=False,
+        nullable=True,
         comment="UF de destino (2 letras). Ex: SP, RJ, MG. "
-                "Derivado de CIDADE - UF DESTINO (Seção 4.2).",
-    )
-
-    cidade_destino_raw = Column(
-        String(200),
-        nullable=True,
-        comment="Valor original de CIDADE - UF DESTINO "
-                "antes da normalização (Seção 4.2).",
-    )
-
-    # ── Remetente (CLIENTE REMETENTE) ────────────
-    cod_remetente = Column(
-        String(50),
-        nullable=False,
-        comment="Código do remetente. "
-                "Origem: coluna COD REMETENTE.",
-    )
-
-    cliente_remetente = Column(
-        String(200),
-        nullable=False,
-        comment="Nome do remetente. "
-                "Origem: coluna CLIENTE REMETENTE.",
-    )
-
-    cnpj_remetente = Column(
-        String(14),
-        nullable=False,
-        comment="CNPJ do emitente (14 dígitos, sem máscara). "
-                "Origem: coluna CNPJ REMETENTE.",
-    )
-
-    cidade_remetente = Column(
-        String(100),
-        nullable=False,
-        comment="Cidade de origem. "
-                "Derivado de CIDADE - UF REMETENTE (Seção 4.2).",
-    )
-
-    uf_remetente = Column(
-        String(2),
-        nullable=False,
-        comment="UF de origem (2 letras). "
-                "Derivado de CIDADE - UF REMETENTE (Seção 4.2).",
-    )
-
-    cidade_remetente_raw = Column(
-        String(200),
-        nullable=True,
-        comment="Valor original de CIDADE - UF REMETENTE "
-                "antes da normalização (Seção 4.2).",
+                "Origem: coluna UF DESTINO.",
     )
 
     # ── Produto e Quantidade ─────────────────────
     cod_produto = Column(
-        String(100),
+        String(50),
         nullable=False,
         comment="SKU do produto (catálogo). "
                 "Origem: coluna COD PRODUTO. "
                 "Deve existir no cadastro (Seção 1.2).",
     )
 
-    qtd_cx = Column(
+    quantidade_volumes = Column(
         Integer,
         nullable=False,
         comment="Quantidade de caixas/volumes. "
@@ -228,7 +174,7 @@ class NotaFiscal(Base, AuditMixin):
     )
 
     # ── Peso (derivado do catálogo) ──────────────
-    peso_total_kg = Column(
+    peso_real_kg = Column(
         Numeric(10, 3),
         nullable=False,
         comment="Peso total da NF em kg. "
@@ -285,7 +231,7 @@ class NotaFiscal(Base, AuditMixin):
         Numeric(10, 3),
         nullable=True,
         comment="Snapshot: peso em kg usado no cálculo "
-                "(= peso_total_kg no momento do cálculo).",
+                "(= peso_real_kg no momento do cálculo).",
     )
 
     # ── Status e Rastreabilidade ─────────────────
@@ -308,12 +254,6 @@ class NotaFiscal(Base, AuditMixin):
         Text,
         nullable=True,
         comment="Campo livre. Origem: coluna OBSERVAÇÃO.",
-    )
-
-    centro_custo = Column(
-        Text,
-        nullable=True,
-        comment="Campo livre. Origem: coluna CENTRO DE CUSTO.",
     )
 
     # ── Relacionamentos ──────────────────────────
@@ -345,12 +285,12 @@ class NotaFiscal(Base, AuditMixin):
             name="uq_nf_embarque_numero_serie",
         ),
         CheckConstraint(
-            "qtd_cx >= 1",
-            name="ck_nf_qtd_cx_positiva",
+            "quantidade_volumes >= 1",
+            name="ck_nf_quantidade_volumes_positiva",
         ),
         CheckConstraint(
-            "peso_total_kg > 0",
-            name="ck_nf_peso_total_positivo",
+            "peso_real_kg > 0",
+            name="ck_nf_peso_real_positivo",
         ),
         CheckConstraint(
             "nf_valor IS NULL OR nf_valor >= 0",
@@ -371,6 +311,6 @@ class NotaFiscal(Base, AuditMixin):
         return (
             f"<NotaFiscal NF-{self.numero_nf} | "
             f"SKU={self.cod_produto} | "
-            f"{self.peso_total_kg}kg | "
+            f"{self.peso_real_kg}kg | "
             f"{self.status_calculo}>"
         )

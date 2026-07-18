@@ -13,10 +13,10 @@
 🔗 DEPENDE  : app/models/nota_fiscal.py (StatusCalculoNF)
              app/exceptions/validacao_exceptions.py (StatusNF)
 📅 CRIADO   : 07/07/2026
-📅 ATUALIZADO: 07/07/2026 — B1: peso_real_kg do NFImportRow agora
-              opcional; peso é derivado (QTD_CX × peso_catálogo).
-              11/07/2026 — + CalcularFreteItemResponse,
-              CalcularFreteLoteResponse (Etapa 3: router de frete).
+📅 ATUALIZADO: 18/07/2026 — Refatoração: NotaFiscalRead alinhado
+              ao model simplificado (frete_peso/frete_cte/frete_total
+              removidos; +cod_produto, +transportadora_id, +snapshots
+              de auditoria). NotaFiscalCreate +cod_produto (obrigatório).
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
@@ -66,7 +66,7 @@ class NFImportRow(BaseModel):
     cod_produto: str | None = Field(default=None, max_length=50)
 
     nf_valor: Decimal = Field(..., ge=0)
-    peso_real_kg: Decimal | None = Field(default=None, gt=0)  # B1: opcional (peso derivado)
+    peso_real_kg: Decimal | None = Field(default=None, gt=0)
     quantidade_volumes: int | None = Field(default=None, gt=0)
 
     observacao: str | None = None
@@ -137,6 +137,7 @@ class NotaFiscalCreate(BaseModel):
 
     📐 REGRA DE NEGÓCIO:
         - Só linhas IMPORTADA chegam aqui (decisão B).
+        - cod_produto é obrigatório (model NOT NULL).
         - peso_real_kg aqui é o PESO TOTAL derivado
           (QTD_CX × peso_catálogo) — sempre presente.
         - status_calculo nasce PENDENTE (default do model).
@@ -157,8 +158,9 @@ class NotaFiscalCreate(BaseModel):
     destinatario_cidade: str | None = Field(default=None, max_length=100)
     destinatario_uf: str | None = Field(default=None, max_length=2)
 
+    cod_produto: str = Field(..., max_length=50)
     nf_valor: Decimal = Field(..., ge=0)
-    peso_real_kg: Decimal = Field(..., gt=0)  # peso TOTAL derivado
+    peso_real_kg: Decimal = Field(..., gt=0)
     quantidade_volumes: int | None = Field(default=None, gt=0)
 
     observacao: str | None = None
@@ -173,35 +175,52 @@ class NotaFiscalRead(BaseModel):
     🎯 O QUE FAZ:
         Serializa uma NotaFiscal para resposta da API,
         incluindo id, dados fiscais, resultado do cálculo
-        de frete e status_calculo.
+        de frete, snapshots de auditoria e status_calculo.
 
     📐 REGRA DE NEGÓCIO:
-        - Reflete os campos do model NotaFiscal.
+        - Reflete os campos do model NotaFiscal (Opção B).
         - from_attributes=True permite carregar direto do ORM.
+        - Snapshots preco_ate_30kg_usado, valor_kg_adicional_usado
+          e peso_kg_usado são para auditoria (Seção 6.6).
     '''
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
     embarque_id: UUID
 
+    # Identificação da NF
     numero_nf: str
     serie_nf: str | None = None
     chave_nfe: str | None = None
     data_emissao: date | None = None
 
+    # Destinatário
     destinatario_nome: str | None = None
     destinatario_cnpj_cpf: str | None = None
     destinatario_cidade: str | None = None
     destinatario_uf: str | None = None
 
-    nf_valor: Decimal
-    peso_real_kg: Decimal
+    # Produto e volumes
+    cod_produto: str
     quantidade_volumes: int | None = None
+    peso_real_kg: Decimal
 
-    frete_peso: Decimal | None = None
-    frete_cte: Decimal | None = None
-    frete_total: Decimal | None = None
+    # Dados fiscais
+    nf_valor: Decimal | None = None
 
+    # Transportadora
+    transportadora_id: UUID | None = None
+
+    # Resultado do cálculo de frete
+    valor_calculado: Decimal | None = None
+    prazo_dias: int | None = None
+
+    # Snapshots para auditoria (Seção 6.6)
+    preco_ate_30kg_usado: Decimal | None = None
+    valor_kg_adicional_usado: Decimal | None = None
+    peso_kg_usado: Decimal | None = None
+
+    # Status e rastreabilidade
     status_calculo: StatusCalculoNF
     erro_calculo: str | None = None
     observacao: str | None = None
