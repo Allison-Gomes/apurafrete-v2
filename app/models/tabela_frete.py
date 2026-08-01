@@ -14,26 +14,33 @@
 
              A TabelaFrete agrupa as faixas de peso e
              seus respectivos valores unitários.
+
+             SEPARAÇÃO DE RESPONSABILIDADES:
+               TabelaFrete + FaixaFrete → O QUANTO se cobra.
+               RotaFrete                → PARA ONDE a tabela vale.
 🔗 DEPENDE  : app/models/base.py
              app/models/transportadora.py
+             app/models/rota_frete.py (relationship 'rotas')
 📅 CRIADO  : 24/06/2026
 📅 ATUALIZADO: 11/07/2026 — refatoração MVP: removidos
                cubagem e adicionais; docstrings em aspas
                triplas simples; regra de negócio explícita.
+📅 ATUALIZADO: 28/07/2026 — adicionado relationship 'rotas'
+               (RotaFrete, opção B). A resolução da tabela
+               passa a considerar UF/cidade de destino da NF.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
 import enum
 
 from sqlalchemy import (
-    Column, String, Boolean, Numeric,
-    ForeignKey, CheckConstraint,
+    Boolean, CheckConstraint, Column, ForeignKey, Numeric, String,
     Enum as SAEnum,
 )
-from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
 
-from app.models.base import Base, AuditMixin
+from app.models.base import AuditMixin, Base
 
 
 # ─────────────────────────────────────────────────
@@ -59,8 +66,8 @@ class ModalidadeFrete(str, enum.Enum):
 
     ⚠️  ATENÇÃO:
         Modalidades novas somente com autorização de Allison.
-        A lógica de cálculo em services/calculo_frete.py deve
-        respeitar estritamente este enum.
+        A lógica de cálculo em services/calculo_frete_service.py
+        deve respeitar estritamente este enum.
     '''
     POR_FAIXA = "por_faixa"
     PROGRESSIVO = "progressivo"
@@ -82,9 +89,9 @@ class TabelaFrete(Base, AuditMixin):
           por transportadora por vez.
         - A modalidade define como o engine de cálculo
           interpreta as faixas de peso.
-        - No MVP, a busca da tabela é feita exclusivamente
-          por transportadora_id + tabela_ativa=True, sem
-          filtro de rota (cidade/UF origem/destino).
+        - A resolução da tabela no cálculo é feita por
+          transportadora_id + tabela_ativa=True + RotaFrete
+          que atenda a UF/cidade de destino da NF.
         - Fator de cubagem, GRIS, Ad Valorem, despacho e
           emissão de CT-e estão FORA do escopo MVP (#28).
 
@@ -152,6 +159,17 @@ class TabelaFrete(Base, AuditMixin):
         lazy="select",
     )
 
+    # 🆕 28/07/2026 — dimensão geográfica (opção B).
+    # Resolvido por string para evitar import circular
+    # entre tabela_frete.py e rota_frete.py.
+    rotas = relationship(
+        "RotaFrete",
+        back_populates="tabela",
+        cascade="all, delete-orphan",
+        order_by="RotaFrete.uf",
+        lazy="select",
+    )
+
     # ── Representação ────────────────────────────
     def __repr__(self):
         '''
@@ -205,7 +223,7 @@ class FaixaFrete(Base, AuditMixin):
     ⚠️  ATENÇÃO:
         Não modificar sem autorização de Allison.
         A lógica de seleção de faixa está em
-        services/calculo_frete.py.
+        services/calculo_frete_service.py.
     '''
 
     __tablename__ = "faixas_frete"

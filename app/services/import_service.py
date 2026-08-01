@@ -22,12 +22,17 @@
 🔗 DEPENDE  : app/services/validacao_service.py
              app/repositories/nota_fiscal_repository.py
              app/repositories/embarque_repository.py
-             app/schemas/nf_schema.py
+             app/schemas/nota_fiscal.py
              app/models/produto.py
              app/exceptions/embarque_exceptions.py
 📅 CRIADO   : 11/07/2026
-📅 ATUALIZ. : 18/07/2026 — +parse_planilha_nf, +carregar_catalogo_produtos,
-                           +validação de embarque no importar_nfs
+📅 ATUALIZ. : 28/07/2026 — Decisão #75. Alinhamento do
+                           EXCEL_COLUMN_MAP aos nomes reais dos
+                           campos de NFImportRow:
+                             documento       → numero_nf
+                             centro_de_custo → centro_custo
+                           Import corrigido para app.schemas.nota_fiscal.
+                           +normalização de células (strip / None).
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
@@ -44,7 +49,7 @@ from app.exceptions.embarque_exceptions import EmbarqueNaoEncontradoError
 from app.models.produto import Produto
 from app.repositories.embarque_repository import EmbarqueRepository
 from app.repositories.nota_fiscal_repository import NotaFiscalRepository
-from app.schemas.nf_schema import (
+from app.schemas.nota_fiscal import (
     NFImportError,
     NFImportRow,
     NotaFiscalCreate,
@@ -58,8 +63,13 @@ from app.services.validacao_service import (
 # ─────────────────────────────────────────────────
 # 🗺️ MAPEAMENTO: Cabeçalho Excel → Campo Schema
 # ─────────────────────────────────────────────────
+# ⚠️ As chaves são os cabeçalhos LITERAIS da planilha (Seção 4.1).
+#    Os valores são os nomes EXATOS dos campos de NFImportRow.
+#    Qualquer divergência aqui derruba a importação inteira na
+#    linha 2, pois o Pydantic descarta a chave desconhecida e
+#    acusa o campo obrigatório como ausente.
 EXCEL_COLUMN_MAP: dict[str, str] = {
-    "DOCUMENTO":              "documento",
+    "DOCUMENTO":              "numero_nf",
     "COD CLIENTE":            "cod_cliente",
     "CLIENTE DESTINO":        "cliente_destino",
     "CNPJ DESTINO":           "cnpj_destino",
@@ -71,15 +81,19 @@ EXCEL_COLUMN_MAP: dict[str, str] = {
     "COD PRODUTO":            "cod_produto",
     "QTD CX":                 "qtd_cx",
     "OBSERVAÇÃO":             "observacao",
-    "CENTRO DE CUSTO":        "centro_de_custo",
+    "CENTRO DE CUSTO":        "centro_custo",
 }
 
 # Colunas obrigatórias — se faltar alguma, a planilha é rejeitada.
+# Nomes de CAMPO (pós-mapeamento), não de cabeçalho.
 REQUIRED_COLUMNS: list[str] = [
-    "documento", "cod_cliente", "cliente_destino", "cnpj_destino",
+    "numero_nf", "cod_cliente", "cliente_destino", "cnpj_destino",
     "cidade_uf_destino", "cod_remetente", "cliente_remetente",
     "cnpj_remetente", "cidade_uf_remetente", "cod_produto", "qtd_cx",
 ]
+
+# Rótulo legível por campo, para mensagens de erro ao usuário.
+_FIELD_TO_HEADER: dict[str, str] = {v: k for k, v in EXCEL_COLUMN_MAP.items()}
 
 
 # ─────────────────────────────────────────────────
@@ -109,8 +123,44 @@ class ImportLoteResult(BaseModel):
 
 
 # ══════════════════════════════════════════════════
-# 🔧 FUNÇÕES AUXILIARES (NOVAS)
+# 🔧 FUNÇÕES AUXILIARES
 # ══════════════════════════════════════════════════
+
+def _normalizar_celula(valor: object) -> object | None:
+    '''
+    🎯 O QUE FAZ:
+        Normaliza o valor bruto de uma célula do Excel antes
+        de alimentar o schema.
+
+    📐 REGRA:
+        - None permanece None.
+        - str é feito strip(); string vazia vira None (para que
+          campos opcionais não recebam "" e campos obrigatórios
+          falhem corretamente como ausentes).
+        - Demais tipos (int, float, datetime, Decimal) passam
+          intactos — a coerção é do Pydantic.
+    '''
+    if valor is None:
+        return None
+    if isinstance(valor, str):
+        limpo = valor.strip()
+        return limpo if limpo else None
+    return valor
+
+
+def _linha_vazia(row: tuple) -> bool:
+    '''
+    🎯 O QUE FAZ:
+        Detecta linhas totalmente vazias, comuns no fim de
+        planilhas editadas manualmente (openpyxl as devolve
+        como tuplas de None).
+
+    📐 REGRA:
+        Linha vazia é ignorada silenciosamente, não conta como
+        erro nem entra em total_linhas.
+    '''
+    return all(_normalizar_celula(c) is None for c in row)
+
 
 def parse_planilha_nf(conteudo: bytes) -> list[NFImportRow]:
     '''
@@ -121,6 +171,7 @@ def parse_planilha_nf(conteudo: bytes) -> list[NFImportRow]:
     📐 REGRA:
         - A primeira linha da planilha é tratada como cabeçalho.
         - Colunas obrigatórias ausentes → ValueError (router → HTTP 400).
+        - Linhas totalmente vazias são ignoradas.
         - Linhas de dados que falham na construção do schema
           → ValueError com número da linha.
         - Colunas opcionais (OBSERVAÇÃO, CENTRO DE CUSTO) são
@@ -137,54 +188,67 @@ def parse_planilha_nf(conteudo: bytes) -> list[NFImportRow]:
         - Coluna obrigatória ausente no cabeçalho.
         - Linha de dados inválida (ex.: tipo incompatível).
     '''
-    wb = load_workbook(filename=BytesIO(conteudo), read_only=True)
-    ws = wb.active
+    wb = load_workbook(filename=BytesIO(conteudo), read_only=True, data_only=True)
 
-    if ws is None:
-        raise ValueError("Planilha não contém uma aba ativa.")
+    try:
+        ws = wb.active
 
-    rows = list(ws.iter_rows(min_row=1, values_only=True))
+        if ws is None:
+            raise ValueError("Planilha não contém uma aba ativa.")
 
-    if len(rows) < 2:
-        raise ValueError(
-            "Planilha vazia ou sem dados. "
-            "Esperado: linha 1 = cabeçalho, linhas 2+ = dados."
-        )
+        rows = list(ws.iter_rows(min_row=1, values_only=True))
 
-    # ── Cabeçalho ──────────────────────────────
-    raw_headers = [str(h).strip() if h is not None else "" for h in rows[0]]
-
-    col_index: dict[str, int] = {}
-    for idx, header in enumerate(raw_headers):
-        field = EXCEL_COLUMN_MAP.get(header)
-        if field:
-            col_index[field] = idx
-
-    missing = [f for f in REQUIRED_COLUMNS if f not in col_index]
-    if missing:
-        raise ValueError(
-            f"Colunas obrigatórias ausentes no cabeçalho: {', '.join(missing)}"
-        )
-
-    # ── Linhas de dados ────────────────────────
-    import_rows: list[NFImportRow] = []
-
-    for row_num, row in enumerate(rows[1:], start=2):
-        row_data: dict[str, object] = {}
-
-        for field, idx in col_index.items():
-            val = row[idx] if idx < len(row) else None
-            row_data[field] = val
-
-        try:
-            import_rows.append(NFImportRow(**row_data))
-        except ValidationError as exc:
+        if len(rows) < 2:
             raise ValueError(
-                f"Erro na linha {row_num}: {exc}"
-            ) from exc
+                "Planilha vazia ou sem dados. "
+                "Esperado: linha 1 = cabeçalho, linhas 2+ = dados."
+            )
 
-    wb.close()
-    return import_rows
+        # ── Cabeçalho ──────────────────────────────
+        raw_headers = [
+            str(h).strip().upper() if h is not None else ""
+            for h in rows[0]
+        ]
+
+        col_index: dict[str, int] = {}
+        for idx, header in enumerate(raw_headers):
+            field = EXCEL_COLUMN_MAP.get(header)
+            if field:
+                col_index[field] = idx
+
+        missing = [f for f in REQUIRED_COLUMNS if f not in col_index]
+        if missing:
+            rotulos = [_FIELD_TO_HEADER.get(f, f) for f in missing]
+            raise ValueError(
+                f"Colunas obrigatórias ausentes no cabeçalho: "
+                f"{', '.join(rotulos)}"
+            )
+
+        # ── Linhas de dados ────────────────────────
+        import_rows: list[NFImportRow] = []
+
+        for row_num, row in enumerate(rows[1:], start=2):
+            if _linha_vazia(row):
+                continue
+
+            row_data: dict[str, object | None] = {}
+
+            for field, idx in col_index.items():
+                bruto = row[idx] if idx < len(row) else None
+                row_data[field] = _normalizar_celula(bruto)
+
+            try:
+                import_rows.append(NFImportRow(**row_data))
+            except ValidationError as exc:
+                raise ValueError(f"Erro na linha {row_num}: {exc}") from exc
+
+        if not import_rows:
+            raise ValueError("Planilha não contém nenhuma linha de dados válida.")
+
+        return import_rows
+
+    finally:
+        wb.close()
 
 
 def carregar_catalogo_produtos(db: Session) -> dict[str, ProdutoInfo]:
@@ -205,7 +269,11 @@ def carregar_catalogo_produtos(db: Session) -> dict[str, ProdutoInfo]:
 
     📤 dict[str, ProdutoInfo]: chave = SKU, valor = ProdutoInfo.
     '''
-    produtos = db.query(Produto).filter(Produto.ativo == True).all()  # noqa: E712
+    produtos = (
+        db.query(Produto)
+        .filter(Produto.ativo.is_(True))
+        .all()
+    )
 
     catalogo: dict[str, ProdutoInfo] = {}
     for p in produtos:
@@ -219,7 +287,7 @@ def carregar_catalogo_produtos(db: Session) -> dict[str, ProdutoInfo]:
 
 
 # ══════════════════════════════════════════════════
-# 🚀 ENTRYPOINT: importar_nfs (ATUALIZADO)
+# 🚀 ENTRYPOINT: importar_nfs
 # ══════════════════════════════════════════════════
 
 def importar_nfs(
@@ -232,7 +300,7 @@ def importar_nfs(
     🎯 O QUE FAZ:
         Orquestra o fluxo completo de importação de NFs
         em lote, da planilha bruta até a persistência:
-          0. Valida existência do embarque (NOVO)
+          0. Valida existência do embarque
           1. Valida e enriquece as linhas (validacao_service)
           2. Consulta chaves já existentes no embarque (repository)
           3. Filtra duplicatas — ignoradas silenciosamente (#33, #44)
@@ -242,6 +310,10 @@ def importar_nfs(
     📐 REGRA DE NEGÓCIO:
         - Embarque inexistente/inativo → EmbarqueNaoEncontradoError.
         - Duplicatas NÃO interrompem o lote e NÃO viram erro.
+        - Chave de dedup: (numero_nf, serie_nf) dentro do embarque,
+          espelhando uq_nf_embarque_numero_serie.
+        - Deduplica também DENTRO do próprio lote, evitando violar
+          a unique quando a planilha repete a mesma NF.
         - Se zero linhas válidas após validação → retorna vazio
           sem tocar no banco (nem chama o repository).
         - Se todas as válidas forem duplicatas → retorna vazio
@@ -292,19 +364,21 @@ def importar_nfs(
             erros=erros_validacao,
         )
 
-    # ── Etapa 2: Dedup vs. banco (#44) ──────────
+    # ── Etapa 2: Dedup vs. banco + intra-lote (#44) ──
     repo = NotaFiscalRepository(session)
 
-    chaves_existentes = repo.buscar_chaves_existentes(embarque_id)
+    chaves_existentes = set(repo.buscar_chaves_existentes(embarque_id))
 
     novas: list[NotaFiscalCreate] = []
     duplicatas = 0
+    vistas: set[tuple[str, str | None]] = set()
 
     for nf in criadas:
         chave = (nf.numero_nf, nf.serie_nf)
-        if chave in chaves_existentes:
+        if chave in chaves_existentes or chave in vistas:
             duplicatas += 1  # ignorada silenciosamente (#33)
         else:
+            vistas.add(chave)
             novas.append(nf)
 
     if not novas:

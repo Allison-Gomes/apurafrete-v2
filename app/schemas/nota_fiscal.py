@@ -11,12 +11,17 @@
                  linhas de erro no relatório de importação.
                - Na NF, o único status persistido é status_calculo.
 🔗 DEPENDE  : app/models/nota_fiscal.py (StatusCalculoNF)
-             app/exceptions/validacao_exceptions.py (StatusNF)
+              app/exceptions/validacao_exceptions.py (StatusNF)
 📅 CRIADO   : 07/07/2026
-📅 ATUALIZADO: 18/07/2026 — Refatoração: NotaFiscalRead alinhado
-              ao model simplificado (frete_peso/frete_cte/frete_total
-              removidos; +cod_produto, +transportadora_id, +snapshots
-              de auditoria). NotaFiscalCreate +cod_produto (obrigatório).
+📅 ATUALIZADO: 28/07/2026 — Alinhamento ao schema REAL do banco.
+               Renomes: quantidade_volumes → qtd_cx,
+               peso_real_kg → peso_total_kg.
+               Bloco destinatario_* substituído pelos campos
+               desnormalizados reais + bloco remetente completo.
+               NFImportRow tornado PERMISSIVO (todos opcionais,
+               sem max_length): obrigatoriedade e formato são
+               julgados no validacao_service, para que uma célula
+               ruim rejeite a LINHA e não aborte o LOTE.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
@@ -42,39 +47,55 @@ from app.models.nota_fiscal import StatusCalculoNF
 class NFImportRow(BaseModel):
     '''
     🎯 O QUE FAZ:
-        Representa uma linha crua da planilha de importação,
-        com validação básica de formato/presença.
+        Representa uma linha crua da planilha de importação.
+        É um schema de TRANSPORTE TOLERANTE.
 
     📐 REGRA DE NEGÓCIO:
-        - Peso real é DERIVADO (QTD_CX × peso_catálogo).
-          O peso da planilha NÃO é usado (B1) — coluna opcional.
-        - Validações de SKU/CNPJ/campos são feitas no
-          validacao_service (que lança as exceções StatusNF).
+        - Espelha os cabeçalhos da planilha (Seção 4.1), não o model.
+        - Cidade e UF vêm JUNTAS em `cidade_uf_*` ("CIDADE - UF");
+          o split é feito no validacao_service (Seção 4.2).
+        - TODOS os campos são opcionais e SEM max_length de propósito:
+          obrigatoriedade/tamanho são julgados no validacao_service,
+          que rejeita a LINHA e segue o lote. Um Field(...) estrito
+          aqui abortaria a importação inteira por uma célula ruim.
+        - Peso é DERIVADO (qtd_cx × produto.peso_real_kg).
+          O peso da planilha NÃO é usado (B1) — não há coluna.
     '''
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    numero_nf: str = Field(..., max_length=50)
-    serie_nf: str | None = Field(default=None, max_length=10)
-    chave_nfe: str | None = Field(default=None, max_length=44)
+    # Identificação
+    numero_nf: str | None = Field(default=None, description="Coluna DOCUMENTO")
+    serie_nf: str | None = None
+    chave_nfe: str | None = None
     data_emissao: date | None = None
 
-    destinatario_nome: str | None = Field(default=None, max_length=200)
-    destinatario_cnpj_cpf: str | None = Field(default=None, max_length=18)
-    destinatario_cidade: str | None = Field(default=None, max_length=100)
-    destinatario_uf: str | None = Field(default=None, max_length=2)
+    # Destino (colunas 2-5)
+    cod_cliente: str | None = None
+    cliente_destino: str | None = None
+    cnpj_destino: str | None = None
+    cidade_uf_destino: str | None = Field(
+        default=None,
+        description="Coluna 'CIDADE - UF DESTINO' (bruta)",
+    )
 
-    cod_produto: str | None = Field(default=None, max_length=50)
+    # Origem (colunas 6-9)
+    cod_remetente: str | None = None
+    cliente_remetente: str | None = None
+    cnpj_remetente: str | None = None
+    cidade_uf_remetente: str | None = Field(
+        default=None,
+        description="Coluna 'CIDADE - UF REMETENTE' (bruta)",
+    )
 
-    nf_valor: Decimal = Field(..., ge=0)
-    peso_real_kg: Decimal | None = Field(default=None, gt=0)
-    quantidade_volumes: int | None = Field(default=None, gt=0)
+    # Produto / carga
+    cod_produto: str | None = None
+    # ⚠️ sem ge=1: qtd_cx ≤ 0 deve virar ERRO_CAMPO no relatório.
+    qtd_cx: int | None = Field(default=None, description="Coluna QTD CX")
 
+    # Fiscais e livres
+    nf_valor: Decimal | None = None
     observacao: str | None = None
-
-    @field_validator("destinatario_uf")
-    @classmethod
-    def uf_maiuscula(cls, v: str | None) -> str | None:
-        return v.upper() if v else v
+    centro_custo: str | None = None
 
 
 # ═════════════════════════════════════════════════
@@ -137,33 +158,67 @@ class NotaFiscalCreate(BaseModel):
 
     📐 REGRA DE NEGÓCIO:
         - Só linhas IMPORTADA chegam aqui (decisão B).
-        - cod_produto é obrigatório (model NOT NULL).
-        - peso_real_kg aqui é o PESO TOTAL derivado
-          (QTD_CX × peso_catálogo) — sempre presente.
+        - Este schema é ESTRITO: é o contrato com o banco.
+          Toda constraint (max_length, gt=0) espelha a coluna.
+        - CNPJs já chegam limpos (14 dígitos, sem máscara).
+        - cidade_*_raw guarda o texto original da planilha.
+        - peso_total_kg é DERIVADO (qtd_cx × peso_real_kg).
         - status_calculo nasce PENDENTE (default do model).
-        - Campos frete_* NÃO entram aqui — são preenchidos
-          pelo engine de cálculo (services/calculo_frete.py).
+        - Campos de cálculo/snapshot NÃO entram aqui — são
+          preenchidos pelo engine (calculo_frete_service.py).
     '''
     model_config = ConfigDict(str_strip_whitespace=True)
 
     embarque_id: UUID
 
+    # Identificação da NF
     numero_nf: str = Field(..., max_length=50)
     serie_nf: str | None = Field(default=None, max_length=10)
     chave_nfe: str | None = Field(default=None, max_length=44)
     data_emissao: date | None = None
 
-    destinatario_nome: str | None = Field(default=None, max_length=200)
-    destinatario_cnpj_cpf: str | None = Field(default=None, max_length=18)
-    destinatario_cidade: str | None = Field(default=None, max_length=100)
-    destinatario_uf: str | None = Field(default=None, max_length=2)
+    # Remetente / ORIGEM
+    cod_remetente: str = Field(..., max_length=50)
+    cliente_remetente: str = Field(..., max_length=200)
+    cnpj_remetente: str = Field(..., min_length=14, max_length=14)
+    cidade_remetente: str = Field(..., max_length=100)
+    uf_remetente: str = Field(..., min_length=2, max_length=2)
+    cidade_remetente_raw: str | None = Field(default=None, max_length=200)
 
-    cod_produto: str = Field(..., max_length=50)
-    nf_valor: Decimal = Field(..., ge=0)
-    peso_real_kg: Decimal = Field(..., gt=0)
-    quantidade_volumes: int | None = Field(default=None, gt=0)
+    # Destinatário / DESTINO
+    cod_cliente: str = Field(..., max_length=50)
+    cliente_destino: str = Field(..., max_length=200)
+    cnpj_destino: str = Field(..., min_length=14, max_length=14)
+    cidade_destino: str = Field(..., max_length=100)
+    uf_destino: str = Field(..., min_length=2, max_length=2)
+    cidade_destino_raw: str | None = Field(default=None, max_length=200)
 
+    # Produto e carga
+    cod_produto: str = Field(..., max_length=100)
+    qtd_cx: int = Field(..., ge=1)
+    peso_total_kg: Decimal = Field(..., gt=0)
+
+    # Dados fiscais
+    nf_valor: Decimal | None = Field(default=None, ge=0)
+
+    # Campos livres
     observacao: str | None = None
+    centro_custo: str | None = None
+
+    @field_validator("uf_remetente", "uf_destino")
+    @classmethod
+    def uf_maiuscula(cls, v: str) -> str:
+        '''📐 UF sempre em caixa alta (chave de rota).'''
+        return v.upper()
+
+    @field_validator("cnpj_remetente", "cnpj_destino")
+    @classmethod
+    def cnpj_somente_digitos(cls, v: str) -> str:
+        '''📐 Última barreira: garante 14 dígitos sem máscara.'''
+        limpo = "".join(c for c in v if c.isdigit())
+        if len(limpo) != 14:
+            raise ValueError("CNPJ deve ter 14 dígitos")
+        return limpo
 
 
 # ─────────────────────────────────────────────────
@@ -178,7 +233,7 @@ class NotaFiscalRead(BaseModel):
         de frete, snapshots de auditoria e status_calculo.
 
     📐 REGRA DE NEGÓCIO:
-        - Reflete os campos do model NotaFiscal (Opção B).
+        - Reflete 1:1 os campos do model NotaFiscal.
         - from_attributes=True permite carregar direto do ORM.
         - Snapshots preco_ate_30kg_usado, valor_kg_adicional_usado
           e peso_kg_usado são para auditoria (Seção 6.6).
@@ -194,16 +249,26 @@ class NotaFiscalRead(BaseModel):
     chave_nfe: str | None = None
     data_emissao: date | None = None
 
-    # Destinatário
-    destinatario_nome: str | None = None
-    destinatario_cnpj_cpf: str | None = None
-    destinatario_cidade: str | None = None
-    destinatario_uf: str | None = None
+    # Remetente / ORIGEM
+    cod_remetente: str
+    cliente_remetente: str
+    cnpj_remetente: str
+    cidade_remetente: str
+    uf_remetente: str
+    cidade_remetente_raw: str | None = None
 
-    # Produto e volumes
+    # Destinatário / DESTINO
+    cod_cliente: str
+    cliente_destino: str
+    cnpj_destino: str
+    cidade_destino: str
+    uf_destino: str
+    cidade_destino_raw: str | None = None
+
+    # Produto e carga
     cod_produto: str
-    quantidade_volumes: int | None = None
-    peso_real_kg: Decimal
+    qtd_cx: int
+    peso_total_kg: Decimal
 
     # Dados fiscais
     nf_valor: Decimal | None = None
@@ -224,6 +289,7 @@ class NotaFiscalRead(BaseModel):
     status_calculo: StatusCalculoNF
     erro_calculo: str | None = None
     observacao: str | None = None
+    centro_custo: str | None = None
 
 
 # ═════════════════════════════════════════════════
@@ -237,19 +303,18 @@ class NotaFiscalRead(BaseModel):
 class CalcularFreteItemResponse(BaseModel):
     '''
     🎯 O QUE FAZ:
-        Resposta individual do cálculo de frete para
-        uma NF — usada tanto na rota individual quanto
-        como item dentro do lote.
+        Resposta individual do cálculo de frete para uma NF —
+        usada na rota individual e como item dentro do lote.
 
     📐 CAMPOS:
-        - nf_id              : UUID da NF
-        - numero_nf          : número fiscal da NF
-        - status             : "calculado" | "sem_tabela" |
-                               "sem_transportadora" | "erro"
-        - valor_frete        : valor calculado (None se erro)
-        - peso_utilizado_kg  : peso usado no cálculo
-        - tabela_nome        : nome da tabela aplicada
-        - erro               : mensagem de erro (None se ok)
+        - nf_id             : UUID da NF
+        - numero_nf         : número fiscal da NF
+        - status            : "calculado" | "sem_tabela" |
+                              "sem_transportadora" | "erro"
+        - valor_frete       : valor calculado (None se erro)
+        - peso_utilizado_kg : peso usado no cálculo
+        - tabela_nome       : nome da tabela aplicada
+        - erro              : mensagem de erro (None se ok)
     '''
     nf_id: UUID
     numero_nf: str
@@ -277,9 +342,9 @@ class CalcularFreteItemResponse(BaseModel):
 class CalcularFreteLoteResponse(BaseModel):
     '''
     🎯 O QUE FAZ:
-        Resumo consolidado do cálculo em lote:
-        quantas NFs foram calculadas com sucesso e
-        quantas falharam, com breakdown por motivo.
+        Resumo consolidado do cálculo em lote: quantas NFs
+        foram calculadas com sucesso e quantas falharam,
+        com breakdown por motivo.
 
     📐 CAMPOS:
         - embarque_id        : UUID do embarque processado

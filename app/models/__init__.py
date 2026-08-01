@@ -11,12 +11,16 @@
              app/models/empresa.py
              app/models/usuario.py
              app/models/transportadora.py
-             app/models/tabela_frete.py (TabelaFrete, FaixaFrete)
+             app/models/tabela_frete.py (TabelaFrete, FaixaFrete, ModalidadeFrete)
+             app/models/rota_frete.py (RotaFrete)
              app/models/embarque.py
              app/models/nota_fiscal.py
              app/models/cte.py
              app/models/log_auditoria.py
 📅 CRIADO  : 24/06/2026
+📅 ATUALIZADO: 28/07/2026 — registro do model RotaFrete
+               (dimensão geográfica, opção B) e exposição
+               dos enums ModalidadeFrete e StatusCalculoNF.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
@@ -29,11 +33,20 @@ from app.models.usuario import Usuario
 from app.models.transportadora import Transportadora
 
 # ── Tabela de Frete ──────────────────────────────
-from app.models.tabela_frete import TabelaFrete, FaixaFrete
+from app.models.tabela_frete import (
+    TabelaFrete,
+    FaixaFrete,
+    ModalidadeFrete,
+)
+
+# ── Rotas de Frete (dimensão geográfica) ─────────
+# IMPORTANTE: importar APÓS tabela_frete para que o
+# relationship 'rotas' seja resolvido corretamente.
+from app.models.rota_frete import RotaFrete
 
 # ── Operação ─────────────────────────────────────
 from app.models.embarque import Embarque
-from app.models.nota_fiscal import NotaFiscal
+from app.models.nota_fiscal import NotaFiscal, StatusCalculoNF
 
 # ── CT-e ─────────────────────────────────────────
 from app.models.cte import Cte, ItemCte
@@ -55,10 +68,15 @@ __all__ = [
     # Tabela de Frete
     "TabelaFrete",
     "FaixaFrete",
+    "ModalidadeFrete",
+
+    # Rotas de Frete
+    "RotaFrete",
 
     # Operação
     "Embarque",
     "NotaFiscal",
+    "StatusCalculoNF",
 
     # CT-e
     "Cte",
@@ -71,20 +89,27 @@ __all__ = [
 ]
 
 
-
 '''
-Notas do arquivo
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 NOTAS DO ARQUIVO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 Por que centralizar no __init__.py?
-| Benefício | Detalhe |
-| --- | --- |
-| Import único | from app.models import Empresa em vez de from app.models.empresa import Empresa |
-| Registro garantido | O SQLAlchemy precisa que todos os models sejam importados antes do create_all() ou das migrações Alembic |
-| Rastreabilidade | Um único lugar para verificar todos os models ativos do sistema |
-| Alembic | O env.py do Alembic importa este __init__.py para detectar automaticamente todas as tabelas |
 
-Uso esperado no restante do projeto
-# Em qualquer service, rota ou script:
-from app.models import Embarque, NotaFiscal, AuditoriaLog, AcaoLog
+| Benefício          | Detalhe                                                      |
+| ------------------ | ------------------------------------------------------------ |
+| Import único       | from app.models import Empresa                               |
+| Registro garantido | SQLAlchemy exige todos os models importados antes do Alembic |
+| Rastreabilidade    | Um único lugar para verificar todos os models ativos         |
+| Alembic            | O env.py importa este __init__.py e detecta todas as tabelas |
 
+Ordem de import importa:
+    tabela_frete → rota_frete
+O relationship 'rotas' em TabelaFrete usa string ("RotaFrete"),
+então funciona em qualquer ordem — mas manter a ordem acima
+torna a leitura do grafo de dependências explícita.
 
+Uso esperado no restante do projeto:
+    from app.models import Embarque, NotaFiscal, RotaFrete
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
