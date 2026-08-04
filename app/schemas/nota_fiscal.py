@@ -1,6 +1,6 @@
 '''
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📁 ARQUIVO : nota_fiscal.py
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📁 ARQUIVO : app/schemas/nota_fiscal.py
 📦 MÓDULO  : Embarque / Importação de NF / Cálculo de Frete
 🎯 OBJETIVO: Schemas Pydantic (v2) para importação, validação,
              serialização de Notas Fiscais e cálculo de frete.
@@ -13,16 +13,23 @@
 🔗 DEPENDE  : app/models/nota_fiscal.py (StatusCalculoNF)
               app/exceptions/validacao_exceptions.py (StatusNF)
 📅 CRIADO   : 07/07/2026
-📅 ATUALIZADO: 28/07/2026 — Alinhamento ao schema REAL do banco.
-               Renomes: quantidade_volumes → qtd_cx,
-               peso_real_kg → peso_total_kg.
-               Bloco destinatario_* substituído pelos campos
-               desnormalizados reais + bloco remetente completo.
-               NFImportRow tornado PERMISSIVO (todos opcionais,
-               sem max_length): obrigatoriedade e formato são
-               julgados no validacao_service, para que uma célula
-               ruim rejeite a LINHA e não aborte o LOTE.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 ATUALIZADO: 04/08/2026 — Alinhamento aos TypedDicts do engine
+               (calculo_frete_service.py L191 e L214).
+               Campos acrescentados aos schemas de cálculo:
+                 + CalcularFreteItemResponse.rota
+                   (ResultadoCalculoNF.rota, L206)
+                 + CalcularFreteItemResponse.prazo_dias
+                   (ResultadoCalculoNF.prazo_dias, L210)
+                 + CalcularFreteLoteResponse.ignoradas
+                   (ResultadoCalculoLote.ignoradas, L227)
+                 + CalcularFreteLoteResponse.sem_rota
+                   (ResultadoCalculoLote.sem_rota, L228)
+               Sem esses campos o FastAPI DESCARTAVA a
+               informação silenciosamente: o operador via
+               total_nfs=10 com a soma dos contadores em 3 e
+               nenhuma explicação para as 7 restantes, e
+               perdia a evidência de qual rota precificou.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 '''
 
 from __future__ import annotations
@@ -36,14 +43,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models.nota_fiscal import StatusCalculoNF
 
 
-# ═════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════
 # 📥 IMPORTACAO — Schemas de entrada da planilha
-# ═════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════
 
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # 📥 SCHEMA: NFImportRow
 # Linha crua vinda da planilha, antes de normalizar.
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 class NFImportRow(BaseModel):
     '''
     🎯 O QUE FAZ:
@@ -52,7 +59,7 @@ class NFImportRow(BaseModel):
 
     📐 REGRA DE NEGÓCIO:
         - Espelha os cabeçalhos da planilha (Seção 4.1), não o model.
-        - Cidade e UF vêm JUNTAS em `cidade_uf_*` ("CIDADE - UF");
+        - Cidade e UF vêm JUNTAS em `cidade_uf_*` ('CIDADE - UF');
           o split é feito no validacao_service (Seção 4.2).
         - TODOS os campos são opcionais e SEM max_length de propósito:
           obrigatoriedade/tamanho são julgados no validacao_service,
@@ -64,7 +71,7 @@ class NFImportRow(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     # Identificação
-    numero_nf: str | None = Field(default=None, description="Coluna DOCUMENTO")
+    numero_nf: str | None = Field(default=None, description='Coluna DOCUMENTO')
     serie_nf: str | None = None
     chave_nfe: str | None = None
     data_emissao: date | None = None
@@ -90,7 +97,7 @@ class NFImportRow(BaseModel):
     # Produto / carga
     cod_produto: str | None = None
     # ⚠️ sem ge=1: qtd_cx ≤ 0 deve virar ERRO_CAMPO no relatório.
-    qtd_cx: int | None = Field(default=None, description="Coluna QTD CX")
+    qtd_cx: int | None = Field(default=None, description='Coluna QTD CX')
 
     # Fiscais e livres
     nf_valor: Decimal | None = None
@@ -98,14 +105,14 @@ class NFImportRow(BaseModel):
     centro_custo: str | None = None
 
 
-# ═════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════
 # ❌ IMPORTACAO — Schemas de erro e resultado
-# ═════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════
 
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # ❌ SCHEMA: NFImportError
 # Linha rejeitada — vai para o relatório, não vira NF.
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 class NFImportError(BaseModel):
     '''
     🎯 O QUE FAZ:
@@ -118,17 +125,23 @@ class NFImportError(BaseModel):
           (SEM_PRODUTO / ERRO_CNPJ / ERRO_CAMPO).
         - Estas linhas NÃO geram registro em notas_fiscais.
     '''
-    linha: int = Field(..., description="Índice da linha na planilha (1-based)")
+    linha: int = Field(
+        ...,
+        description='Índice da linha na planilha (1-based)',
+    )
     numero_nf: str | None = None
-    status: str = Field(..., description="Código StatusNF do erro")
-    campo: str | None = Field(default=None, description="Campo que originou o erro")
-    mensagem: str = Field(..., description="Descrição legível do erro")
+    status: str = Field(..., description='Código StatusNF do erro')
+    campo: str | None = Field(
+        default=None,
+        description='Campo que originou o erro',
+    )
+    mensagem: str = Field(..., description='Descrição legível do erro')
 
 
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # 📊 SCHEMA: NFImportResult
 # Resumo do lote de importação.
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 class NFImportResult(BaseModel):
     '''
     🎯 O QUE FAZ:
@@ -142,14 +155,14 @@ class NFImportResult(BaseModel):
     erros: list[NFImportError] = Field(default_factory=list)
 
 
-# ═════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════
 # 💾 PERSISTÊNCIA — Schemas de escrita e leitura
-# ═════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════
 
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # 💾 SCHEMA: NotaFiscalCreate
 # Payload normalizado para persistir (só IMPORTADA).
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 class NotaFiscalCreate(BaseModel):
     '''
     🎯 O QUE FAZ:
@@ -205,26 +218,26 @@ class NotaFiscalCreate(BaseModel):
     observacao: str | None = None
     centro_custo: str | None = None
 
-    @field_validator("uf_remetente", "uf_destino")
+    @field_validator('uf_remetente', 'uf_destino')
     @classmethod
     def uf_maiuscula(cls, v: str) -> str:
         '''📐 UF sempre em caixa alta (chave de rota).'''
         return v.upper()
 
-    @field_validator("cnpj_remetente", "cnpj_destino")
+    @field_validator('cnpj_remetente', 'cnpj_destino')
     @classmethod
     def cnpj_somente_digitos(cls, v: str) -> str:
         '''📐 Última barreira: garante 14 dígitos sem máscara.'''
-        limpo = "".join(c for c in v if c.isdigit())
+        limpo = ''.join(c for c in v if c.isdigit())
         if len(limpo) != 14:
-            raise ValueError("CNPJ deve ter 14 dígitos")
+            raise ValueError('CNPJ deve ter 14 dígitos')
         return limpo
 
 
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # 📤 SCHEMA: NotaFiscalRead
 # Resposta da API (inclui id + resultado do cálculo).
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 class NotaFiscalRead(BaseModel):
     '''
     🎯 O QUE FAZ:
@@ -237,6 +250,8 @@ class NotaFiscalRead(BaseModel):
         - from_attributes=True permite carregar direto do ORM.
         - Snapshots preco_ate_30kg_usado, valor_kg_adicional_usado
           e peso_kg_usado são para auditoria (Seção 6.6).
+        - prazo_dias é copiado da RotaFrete vencedora e é
+          INFORMATIVO: não participa do cálculo do valor.
     '''
     model_config = ConfigDict(from_attributes=True)
 
@@ -292,53 +307,94 @@ class NotaFiscalRead(BaseModel):
     centro_custo: str | None = None
 
 
-# ═════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════
 # 🧮 CÁLCULO DE FRETE — Schemas de resposta
-# ═════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════
 
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # 📊 SCHEMA: CalcularFreteItemResponse
 # Resultado do cálculo de uma NF individual.
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 class CalcularFreteItemResponse(BaseModel):
     '''
     🎯 O QUE FAZ:
         Resposta individual do cálculo de frete para uma NF —
         usada na rota individual e como item dentro do lote.
 
+    📐 CONTRATO:
+        Espelha o TypedDict ResultadoCalculoNF do engine
+        (calculo_frete_service.py, L191). Todo campo do
+        TypedDict precisa existir aqui, senão o FastAPI
+        DESCARTA o valor silenciosamente na resposta.
+
     📐 CAMPOS:
         - nf_id             : UUID da NF
         - numero_nf         : número fiscal da NF
-        - status            : "calculado" | "sem_tabela" |
-                              "sem_transportadora" | "erro"
-        - valor_frete       : valor calculado (None se erro)
+        - status            : calculado | ignorada | sem_rota |
+                              sem_tabela | sem_transportadora |
+                              erro
+        - valor_frete       : valor calculado (None se falha)
         - peso_utilizado_kg : peso usado no cálculo
         - tabela_nome       : nome da tabela aplicada
+        - rota              : UF/CIDADE da rota vencedora
+                              (asterisco = curinga da UF)
+        - prazo_dias        : prazo da rota vencedora
         - erro              : mensagem de erro (None se ok)
+
+    ⚠️ SEM_ROTA:
+        Não é erro de sistema — é lacuna de cobertura
+        geográfica. O endpoint retorna HTTP 200 com
+        status igual a sem_rota; o operador deve cadastrar
+        a RotaFrete (curinga da UF ou cidade específica).
     '''
     nf_id: UUID
     numero_nf: str
     status: str = Field(
         ...,
-        description="Status final do cálculo",
-        examples=["calculado", "sem_tabela", "sem_transportadora", "erro"],
+        description='Status final do cálculo',
+        examples=[
+            'calculado',
+            'ignorada',
+            'sem_rota',
+            'sem_tabela',
+            'sem_transportadora',
+            'erro',
+        ],
     )
     valor_frete: Decimal | None = Field(
         default=None,
-        description="Valor calculado (None se falha)",
+        description='Valor calculado (None se falha)',
     )
     peso_utilizado_kg: Decimal | None = Field(default=None)
     tabela_nome: str | None = Field(default=None)
+    rota: str | None = Field(
+        default=None,
+        description=(
+            'Rota vencedora no formato UF/CIDADE. Asterisco na '
+            'posição da cidade indica rota curinga da UF. É a '
+            'evidência de qual RotaFrete precificou a NF. '
+            'None quando o cálculo falha.'
+        ),
+        examples=['SP/CAMPINAS', 'MG/*'],
+    )
+    prazo_dias: int | None = Field(
+        default=None,
+        description=(
+            'Prazo em dias da RotaFrete vencedora. Informativo: '
+            'não participa do cálculo do valor. None quando o '
+            'cálculo falha.'
+        ),
+    )
     erro: str | None = Field(
         default=None,
-        description="Mensagem de erro (None se sucesso)",
+        description='Mensagem de erro (None se sucesso)',
     )
 
 
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # 📊 SCHEMA: CalcularFreteLoteResponse
 # Resumo do cálculo em lote de um embarque.
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 class CalcularFreteLoteResponse(BaseModel):
     '''
     🎯 O QUE FAZ:
@@ -346,19 +402,55 @@ class CalcularFreteLoteResponse(BaseModel):
         foram calculadas com sucesso e quantas falharam,
         com breakdown por motivo.
 
+    📐 CONTRATO:
+        Espelha o TypedDict ResultadoCalculoLote do engine
+        (calculo_frete_service.py, L214).
+
+    📐 IDENTIDADE DE SOMA:
+        total_nfs = calculadas + ignoradas + sem_rota
+                    + sem_tabela + sem_transportadora + erro
+
+        Se essa igualdade não fechar na resposta, há campo
+        faltando no schema — foi exatamente o defeito
+        corrigido em 04/08/2026.
+
     📐 CAMPOS:
         - embarque_id        : UUID do embarque processado
         - total_nfs          : total de NFs no embarque
         - calculadas         : NFs com frete calculado
-        - sem_tabela         : NFs cuja transportadora não tem tabela
+        - ignoradas          : NFs marcadas como ignoradas,
+                               puladas sem tocar o banco
+        - sem_rota           : destino sem RotaFrete ativa
+        - sem_tabela         : rota existe, tabela inativa
         - sem_transportadora : NFs sem transportadora definida
-        - erro               : NFs com erro (peso inválido, etc.)
+        - erro               : peso/destino/faixas inválidos
         - resultados         : lista detalhada por NF
+
+    ⚠️ SEM_ROTA vs SEM_TABELA:
+        - sem_rota   : cobertura geográfica — cadastrar a rota
+        - sem_tabela : vigência da precificação — ativar a
+                       tabela da transportadora
+        São ações distintas do operador, por isso contadores
+        separados.
     '''
     embarque_id: UUID
     total_nfs: int = Field(..., ge=0)
     calculadas: int = Field(default=0, ge=0)
-    sem_tabela: int = Field(default=0, ge=0)
+    ignoradas: int = Field(
+        default=0,
+        ge=0,
+        description='NFs marcadas como ignoradas, puladas no lote',
+    )
+    sem_rota: int = Field(
+        default=0,
+        ge=0,
+        description='NFs cujo destino não é atendido por rota ativa',
+    )
+    sem_tabela: int = Field(
+        default=0,
+        ge=0,
+        description='NFs cuja tabela da rota está inativa',
+    )
     sem_transportadora: int = Field(default=0, ge=0)
     erro: int = Field(default=0, ge=0)
     resultados: list[CalcularFreteItemResponse] = Field(default_factory=list)

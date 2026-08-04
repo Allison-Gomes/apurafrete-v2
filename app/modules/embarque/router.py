@@ -1,20 +1,27 @@
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 📁 ARQUIVO : router.py
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 📁 ARQUIVO : app/modules/embarque/router.py
 # 📦 MÓDULO  : Embarque
 # 🎯 OBJETIVO: Rotas HTTP do módulo de embarque:
-#                - Importação de NFs (planilha)  ← NOVO
+#                - Importação de NFs (planilha)
 #                - Cálculo de frete (individual e lote)
 #                - Exportação de embarque
 # 🔗 DEPENDE  : app.services.import_service
 #              app.services.calculo_frete_service
 #              app.services.exportacao_service
-#              app.schemas.nf_schema
+#              app.schemas.nota_fiscal
 #              app.core.deps
 # 📅 CRIADO   : 07/07/2026
-# 📅 ATUALIZADO: 18/07/2026 — adicionado endpoint de
-#               importação (Etapa 5) + exportação
-#               (Etapa 4); try/except no exportar.
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 📅 ATUALIZADO: 04/08/2026 — CORREÇÃO CRÍTICA (#91):
+#               import de 'app.schemas.nf_schema' (módulo
+#               inexistente, renomeado pela Decisão #53)
+#               corrigido para 'app.schemas.nota_fiscal'.
+#               Esse import órfão derrubava app.main por
+#               completo (ModuleNotFoundError).
+#               + try/except no cálculo em lote: antes,
+#                 EmbarqueNaoEncontradoError virava HTTP 500.
+#               + documentação de SEM_ROTA nos dois endpoints
+#                 de cálculo (§8.5 / §10.3).
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 from io import BytesIO
 from uuid import UUID
@@ -25,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import get_db
 from app.exceptions.embarque_exceptions import EmbarqueNaoEncontradoError
-from app.schemas.nf_schema import (
+from app.schemas.nota_fiscal import (
     CalcularFreteItemResponse,
     CalcularFreteLoteResponse,
 )
@@ -45,32 +52,32 @@ from app.services.import_service import (
 router = APIRouter(prefix='/embarques', tags=['Embarque'])
 
 
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # 🩺 Health check
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 @router.get('/health')
 async def health():
     '''Health check do módulo.'''
     return {'modulo': 'embarque', 'status': 'ok'}
 
 
-# ══════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════
 # 📥 POST /embarques/{embarque_id}/importar
-# ══════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════
 @router.post(
     '/{embarque_id}/importar',
     response_model=ImportLoteResult,
-    summary="Importar NFs de planilha Excel",
+    summary='Importar NFs de planilha Excel',
     description=(
-        "Faz upload de uma planilha .xlsx com NFs e as importa "
-        "para o embarque informado. Linhas válidas viram NFs; "
-        "erros de validação são reportados linha a linha. "
-        "Duplicatas são ignoradas silenciosamente."
+        'Faz upload de uma planilha .xlsx com NFs e as importa '
+        'para o embarque informado. Linhas válidas viram NFs; '
+        'erros de validação são reportados linha a linha. '
+        'Duplicatas são ignoradas silenciosamente.'
     ),
 )
 async def importar_planilha_nf(
     embarque_id: UUID,
-    arquivo: UploadFile = File(..., description="Planilha .xlsx com as NFs"),
+    arquivo: UploadFile = File(..., description='Planilha .xlsx com as NFs'),
     db: Session = Depends(get_db),
 ) -> ImportLoteResult:
     '''
@@ -93,17 +100,17 @@ async def importar_planilha_nf(
     📤 ImportLoteResult: total_linhas, total_importadas,
         total_erros, duplicatas_ignoradas, erros[].
     '''
-    # ── Valida extensão ────────────────────────
+    # ── Valida extensão ──────────────────────────────────────
     if not arquivo.filename or not arquivo.filename.lower().endswith('.xlsx'):
         raise HTTPException(
             status_code=400,
             detail='Apenas arquivos .xlsx são aceitos.',
         )
 
-    # ── Lê conteúdo do upload ──────────────────
+    # ── Lê conteúdo do upload ────────────────────────────────
     conteudo = await arquivo.read()
 
-    # ── Parse da planilha ──────────────────────
+    # ── Parse da planilha ────────────────────────────────────
     try:
         linhas = parse_planilha_nf(conteudo)
     except ValueError as exc:
@@ -112,10 +119,10 @@ async def importar_planilha_nf(
             detail=f'Erro ao processar a planilha: {exc}',
         ) from exc
 
-    # ── Carrega catálogo de produtos ───────────
+    # ── Carrega catálogo de produtos ─────────────────────────
     catalogo = carregar_catalogo_produtos(db)
 
-    # ── Pipeline de importação ─────────────────
+    # ── Pipeline de importação ───────────────────────────────
     try:
         _nfs, resultado = importar_nfs(db, linhas, embarque_id, catalogo)
     except EmbarqueNaoEncontradoError as exc:
@@ -132,32 +139,68 @@ async def importar_planilha_nf(
     return resultado
 
 
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # 🧮 POST /embarques/{embarque_id}/calcular-frete
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 @router.post(
     '/{embarque_id}/calcular-frete',
     response_model=CalcularFreteLoteResponse,
-    summary="Calcular frete de todas as NFs do embarque",
+    summary='Calcular frete de todas as NFs do embarque',
+    description=(
+        'Dispara o cálculo de frete para todas as NFs calculáveis '
+        'do embarque. NFs com status IGNORADA são puladas (§8.5). '
+        'O resumo traz o breakdown por motivo de falha: '
+        'sem_rota, sem_tabela, sem_transportadora, erro e ignoradas.'
+    ),
 )
 def calcular_frete_lote(
     embarque_id: UUID,
     db: Session = Depends(get_db),
 ):
-    '''Dispara cálculo de frete para todas as NFs pendentes do embarque.'''
-    return calcular_frete_em_lote(
-        db=db,
-        embarque_id=str(embarque_id),
-    )
+    '''
+    🎯 O QUE FAZ:
+        Dispara o cálculo de frete em lote para o embarque.
+        Erro em uma NF não interrompe as demais (§3.5).
+
+    📐 REGRA (#59):
+        Router não contém lógica de negócio. Apenas traduz
+        a exceção de domínio em HTTPException.
+
+    ⚠️ SEM_ROTA (§10.3):
+        NF cujo destino não é atendido por nenhuma RotaFrete
+        ativa é contabilizada em 'sem_rota'. Não é erro de
+        sistema — é lacuna de cobertura geográfica. O operador
+        deve cadastrar a rota (UF curinga ou cidade específica).
+
+    📤 CalcularFreteLoteResponse:
+        total_nfs = calculadas + ignoradas + sem_rota
+                    + sem_tabela + sem_transportadora + erro
+    '''
+    try:
+        return calcular_frete_em_lote(
+            db=db,
+            embarque_id=str(embarque_id),
+        )
+    except EmbarqueNaoEncontradoError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
 
 
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # 🧮 POST /embarques/{embarque_id}/notas/{nf_id}/calcular-frete
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 @router.post(
     '/{embarque_id}/notas/{nf_id}/calcular-frete',
     response_model=CalcularFreteItemResponse,
-    summary="Calcular frete de uma NF específica",
+    summary='Calcular frete de uma NF específica',
+    description=(
+        'Calcula o frete de uma única NF, validando que ela '
+        'pertence ao embarque informado. Retorna o status final '
+        'do cálculo (calculado, ignorada, sem_rota, sem_tabela, '
+        'sem_transportadora, erro) e o prazo em dias da rota.'
+    ),
 )
 def calcular_frete_nf_individual(
     embarque_id: UUID,
@@ -165,9 +208,20 @@ def calcular_frete_nf_individual(
     db: Session = Depends(get_db),
 ):
     '''
-    Calcula o frete de uma única NF do embarque.
+    🎯 O QUE FAZ:
+        Calcula o frete de uma única NF do embarque.
 
-    📤 Retorna 404 se a NF não pertencer ao embarque.
+    📐 REGRA (#57, #58):
+        NFPertenceEmbarqueError → HTTP 404. Impede IDOR:
+        não é possível calcular NF de outro embarque.
+
+    ⚠️ SEM_ROTA (§10.3):
+        Retorna HTTP 200 com status='sem_rota' — não é erro
+        HTTP. O frete não pôde ser calculado por falta de
+        cobertura geográfica, e o campo 'erro' descreve o
+        destino que não foi atendido.
+
+    📤 CalcularFreteItemResponse (HTTP 200) ou 404.
     '''
     try:
         return calcular_frete_nf_no_embarque(
@@ -175,31 +229,42 @@ def calcular_frete_nf_individual(
             embarque_id=str(embarque_id),
             nf_id=str(nf_id),
         )
-    except NFPertenceEmbarqueError:
+    except NFPertenceEmbarqueError as exc:
         raise HTTPException(
             status_code=404,
-            detail=f"NF {nf_id} não encontrada no embarque {embarque_id}.",
-        )
+            detail=f'NF {nf_id} não encontrada no embarque {embarque_id}.',
+        ) from exc
+    except EmbarqueNaoEncontradoError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
 
 
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # 📤 GET /embarques/{embarque_id}/exportar
-# ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 @router.get(
     '/{embarque_id}/exportar',
-    summary="Exportar embarque para Excel",
+    summary='Exportar embarque para Excel',
+    description=(
+        'Gera planilha .xlsx com as NFs do embarque para revisão '
+        'operacional antes do embarque (§11.2).'
+    ),
 )
 def exportar(
     embarque_id: UUID,
     db: Session = Depends(get_db),
 ):
     '''
-    Gera planilha Excel (.xlsx) com as NFs do embarque.
+    🎯 O QUE FAZ:
+        Gera planilha Excel (.xlsx) com as NFs do embarque.
 
-    📎 Retorna arquivo para download com nome:
+    📎 Nome do arquivo:
         embarque_{id}_{data}.xlsx
 
-    📤 Retorna 404 se o embarque não for encontrado.
+    📤 StreamingResponse (HTTP 200) ou 404 se o embarque
+        não for encontrado.
     '''
     try:
         bytes_xlsx, filename = exportar_embarque(db, embarque_id)
